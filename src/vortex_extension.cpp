@@ -30,6 +30,10 @@ static void LoadInternal(DatabaseInstance &db_instance) {
 /// Vortex files in SQL queries.
 void VortexExtension::Load(duckdb::ExtensionLoader &loader) {
 	LoadInternal(loader.GetDatabaseInstance());
+#if __has_include("duckdb/function/distributed_table_function.hpp")
+	loader.RegisterExistingTableFunctionDistributedScan("read_vortex");
+	loader.RegisterExistingTableFunctionDistributedScan("vortex_scan");
+#endif
 }
 
 /// Returns the name of the Vortex extension.

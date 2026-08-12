@@ -1,6 +1,6 @@
 # name: test/sql/timestamp.test
 # description: test timestamp vortex duckdb
-# group: [vortex]
+# group: [sql]
 
 require vortex
 

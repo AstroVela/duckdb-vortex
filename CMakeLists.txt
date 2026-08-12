@@ -117,3 +117,20 @@ install(
     LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
     ARCHIVE DESTINATION "${INSTALL_LIB_DIR}"
 )
+
+option(BUILD_VORTEX_DISTRIBUTED_TESTS
+       "Build the Vane explicit distributed scan protocol test" OFF)
+if(BUILD_VORTEX_DISTRIBUTED_TESTS)
+    if(NOT BUILD_DISTRIBUTED)
+        message(FATAL_ERROR
+                "BUILD_VORTEX_DISTRIBUTED_TESTS requires BUILD_DISTRIBUTED")
+    endif()
+    add_executable(vortex_distributed_protocol_test EXCLUDE_FROM_ALL
+                   test/cpp/vortex_distributed_protocol_test.cpp)
+    target_compile_features(vortex_distributed_protocol_test PRIVATE cxx_std_20)
+    target_include_directories(vortex_distributed_protocol_test
+                               PRIVATE src/include)
+    target_link_libraries(vortex_distributed_protocol_test
+                          ${EXTENSION_NAME} duckdb_static)
+    link_extension_libraries(vortex_distributed_protocol_test "")
+endif()

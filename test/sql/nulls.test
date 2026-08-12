@@ -1,6 +1,7 @@
 # name: test/sql/nulls.test
 # description: test nullable values
-# group: [vortex]
+# group: [sql]
+
 # This test is used to verify that NULL values writen to a vortex file round trip.
 # This is that they are preserved after a file write + read.
 

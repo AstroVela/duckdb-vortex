@@ -1,0 +1,60 @@
+[package]
+name = "vortex-duckdb"
+version = "0.1.0"
+description = "Vortex DuckDB extension"
+homepage = "https://github.com/vortex-data/vortex"
+repository = "https://github.com/vortex-data/vortex"
+authors = ["Vortex Authors <hello@vortex.dev>"]
+license = "Apache-2.0"
+publish = false
+keywords = ["vortex"]
+edition = "2024"
+rust-version = "1.91.0"
+categories = ["database-implementations", "data-structures", "compression"]
+readme = "README.md"
+
+# The `links` key enables DEP_DUCKDB_* environment variables in dependent build scripts.
+# See: https://doc.rust-lang.org/cargo/reference/build-scripts.html#the-links-manifest-key
+links = "duckdb"
+
+[lib]
+name = "vortex_duckdb"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+async-fs = "2.2.0"
+async-trait = "0.1.89"
+bitvec = "1.0.1"
+custom-labels = "0.4.4"
+futures = { version = "0.3.31", default-features = false }
+itertools = "0.14.0"
+kanal = "0.1.1"
+num-traits = "0.2.19"
+object_store = { version = "0.13.2", default-features = false, features = ["aws"] }
+parking_lot = { version = "0.12.3", features = ["nightly"] }
+paste = "1.0.15"
+prost = "0.14"
+static_assertions = "1.1"
+tracing = { version = "0.1.41", default-features = false }
+tracing-subscriber = "0.3"
+url = "2.5.7"
+vortex = { git = "https://github.com/vortex-data/vortex.git", rev = "7e06a99bb7772087c9546137ea6f4593235426a6", features = [
+    "files",
+    "hf",
+    "tokio",
+    "object_store",
+    "object_store_registry",
+] }
+vortex-geo = { git = "https://github.com/vortex-data/vortex.git", rev = "7e06a99bb7772087c9546137ea6f4593235426a6", default-features = false }
+vortex-utils = { git = "https://github.com/vortex-data/vortex.git", rev = "7e06a99bb7772087c9546137ea6f4593235426a6", default-features = false, features = ["dashmap"] }
+
+[features]
+opendal = ["vortex/opendal"]
+
+[build-dependencies]
+bindgen = "0.72.0"
+cbindgen = "0.29.0"
+cc = "1.2"
+reqwest = { version = "0.13.0", features = ["blocking", "charset", "http2", "rustls", "system-proxy"], default-features = false }
+zip = "8.0.0"

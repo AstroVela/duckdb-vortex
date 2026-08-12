@@ -1,6 +1,6 @@
 # name: test/sql/sequence.test
 # description: test simple tables with the vortex extension
-# group: [vortex]
+# group: [sql]
 
 # Before we load the extension, this will fail
 

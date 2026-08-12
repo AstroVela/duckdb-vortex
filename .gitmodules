@@ -1,6 +1,3 @@
-[submodule "duckdb"]
-	path = duckdb
-	url = https://github.com/duckdb/duckdb.git
 [submodule "extension-ci-tools"]
 	path = extension-ci-tools
 	url = https://github.com/duckdb/extension-ci-tools
@@ -8,3 +5,7 @@
 [submodule "vcpkg"]
 	path = vcpkg
 	url = https://github.com/microsoft/vcpkg.git
+[submodule "vane"]
+	path = vane
+	url = https://github.com/AstroVela/vane.git
+	branch = feature/distributed-extension-io-core

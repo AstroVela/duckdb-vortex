@@ -4234,9 +4234,9 @@ dependencies = [
 [[package]]
 name = "vortex-duckdb"
 version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex.git?rev=7e06a99bb7772087c9546137ea6f4593235426a6#7e06a99bb7772087c9546137ea6f4593235426a6"
 dependencies = [
  "async-fs",
+ "async-trait",
  "bindgen",
  "bitvec",
  "cbindgen",
@@ -4249,6 +4249,7 @@ dependencies = [
  "object_store",
  "parking_lot",
  "paste",
+ "prost",
  "reqwest 0.13.4",
  "static_assertions",
  "tracing",
