@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import importlib
 import sys
 import time
 import uuid
@@ -14,7 +16,6 @@ import ray
 
 import vane
 
-
 ROOT = Path(__file__).resolve().parents[2]
 VANE_TESTS = ROOT / "vane" / "tests"
 sys.path.insert(0, str(VANE_TESTS))
@@ -23,8 +24,10 @@ sys.path.insert(0, str(VANE_TESTS / "fast"))
 # Reuse Vane's production-actor fault harness. It owns the retry scheduler,
 # worker replacement, and dynamic split replay mechanics that this extension
 # integration test needs to exercise.
-import test_ray_fte_fault_injection as fault  # noqa: E402
-import test_ray_result_contract as result_contract  # noqa: E402
+fault = importlib.import_module("test_ray_fte_fault_injection")
+result_contract = importlib.import_module("test_ray_result_contract")
+
+pytestmark = [pytest.mark.real_ray, pytest.mark.ray_cluster_owner]
 
 
 def _sql_string(path: Path) -> str:
@@ -192,7 +195,7 @@ def test_vortex_descriptor_replays_after_real_ray_worker_loss(monkeypatch, tmp_p
             raise AssertionError("Vortex scan did not enter the retryable RUNNING state")
 
         ray.kill(actor0, no_restart=True)
-        with pytest.raises(Exception):
+        with pytest.raises(ray.exceptions.RayError):
             asyncio.run(asyncio.wait_for(first_handle.get_result(), timeout=10.0))
 
         retry_handle = fault._wait_for_result_handles(
@@ -220,10 +223,8 @@ def test_vortex_descriptor_replays_after_real_ray_worker_loss(monkeypatch, tmp_p
     finally:
         for actor in (actor0, actor1):
             if actor is not None:
-                try:
+                with contextlib.suppress(ray.exceptions.RayError):
                     ray.kill(actor, no_restart=True)
-                except Exception:
-                    pass
         connection.close()
         fault._clear_fte_state()
         if ray.is_initialized() or fault._FAULT_RAY_CLUSTER is not None:

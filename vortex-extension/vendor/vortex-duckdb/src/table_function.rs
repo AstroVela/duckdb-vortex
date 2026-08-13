@@ -33,7 +33,6 @@ use vortex::array::arrays::StructArray;
 use vortex::array::arrays::scalar_fn::ScalarFnArrayExt;
 use vortex::array::arrays::struct_::StructArrayExt;
 use vortex::array::optimizer::ArrayOptimizer;
-use vortex::buffer::Buffer;
 use vortex::dtype::DType;
 use vortex::dtype::PType;
 use vortex::error::VortexExpect;
@@ -54,8 +53,6 @@ use vortex::scalar_fn::fns::operators::Operator;
 use vortex::scalar_fn::fns::pack::Pack;
 use vortex::scan::DataSource;
 use vortex::scan::ScanRequest;
-use vortex::scan::selection::Selection;
-use vortex::scan::strict_sorted_buffer::StrictSortedBuffer;
 use vortex_utils::aliases::hash_map::HashMap;
 use vortex_utils::parallelism::get_available_parallelism;
 
@@ -85,6 +82,7 @@ use crate::multi_file::bind_multi_file_scan;
 use crate::projection::DuckdbField;
 use crate::projection::Filter;
 use crate::projection::Projection;
+use crate::projection::distributed_local_file_selection;
 use crate::projection::extract_schema_from_dtype;
 
 struct ThreadLabelSetGuard(*mut custom_labels::sys::Labelset);
@@ -258,31 +256,6 @@ pub fn bind(input: &BindInputRef, result: &mut BindResultRef) -> VortexResult<Ta
     })
 }
 
-fn remap_file_selection(
-    selection: &Selection,
-    range: Option<&std::ops::Range<u64>>,
-    file_indexes: &[usize],
-) -> VortexResult<Selection> {
-    let mut selected = Vec::new();
-    for (local_index, &file_index) in file_indexes.iter().enumerate() {
-        let file_index = u64::try_from(file_index)?;
-        let selected_by_filter = selection
-            .row_mask(&(file_index..file_index.saturating_add(1)))
-            .mask()
-            .all_true();
-        let selected_by_range = range.is_none_or(|range| range.contains(&file_index));
-        if selected_by_filter && selected_by_range {
-            selected.push(u64::try_from(local_index)?);
-        }
-    }
-    if selected.len() == file_indexes.len() {
-        return Ok(Selection::All);
-    }
-    Ok(Selection::IncludeByIndex(StrictSortedBuffer::try_new(
-        Buffer::from_iter(selected),
-    )?))
-}
-
 pub fn init_global(init_input: &TableInitInput) -> VortexResult<TableFunctionGlobal> {
     debug!(input=?init_input, "table function global input");
 
@@ -304,8 +277,6 @@ pub fn init_global(init_input: &TableInitInput) -> VortexResult<TableFunctionGlo
         filter,
         row_selection,
         row_range,
-        file_selection,
-        file_range,
         has_non_optional_filter,
     } = Filter::new(
         init_input.table_filter_set(),
@@ -313,6 +284,7 @@ pub fn init_global(init_input: &TableInitInput) -> VortexResult<TableFunctionGlo
         &bind_data.column_fields,
         &bind_data.filter_exprs,
         bind_data.data_source.dtype(),
+        init_input.ignore_optional_filters(),
     )?;
 
     if has_non_optional_filter {
@@ -329,15 +301,14 @@ pub fn init_global(init_input: &TableInitInput) -> VortexResult<TableFunctionGlo
             .map_or_else(|| "true".to_string(), |f| f.to_string()),
         ?row_selection,
         ?row_range,
-        ?file_selection,
-        ?file_range,
         "table function scan input"
     );
 
-    let file_selection = remap_file_selection(
-        &file_selection,
-        file_range.as_ref(),
+    let file_selection = distributed_local_file_selection(
+        init_input.table_filter_set(),
+        column_ids,
         &bind_data.file_indexes,
+        init_input.input.client_context,
     )?;
     let request = ScanRequest {
         projection,

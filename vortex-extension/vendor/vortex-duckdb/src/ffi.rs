@@ -366,7 +366,7 @@ pub unsafe extern "C-unwind" fn duckdb_table_function_distributed_file_is_select
         } else {
             Some(unsafe { TableFilterSet::borrow(filters) })
         };
-        distributed_file_index_is_selected(filters, column_ids, file_index)
+        distributed_file_index_is_selected(filters, column_ids, file_index, ptr::null_mut())
     })
 }
 
@@ -410,6 +410,7 @@ pub unsafe extern "C-unwind" fn duckdb_table_function_init_global_distributed(
             projection_ids_count: input.projection_ids_count,
             filters: input.filters,
             client_context: input.client_context,
+            ignore_optional_filters: input.ignore_optional_filters,
         };
         let global_data = init_global(&TableInitInput::new(&runtime_input))?;
         Ok(Data::from(Box::new(DistributedRuntimeGlobal {

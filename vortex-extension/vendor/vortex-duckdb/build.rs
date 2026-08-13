@@ -496,6 +496,7 @@ fn bindgen_c2rust(crate_dir: &Path, duckdb_include_dir: &Path) {
         .rustified_enum("DUCKDB_VX_EXPR_CLASS")
         .rustified_enum("DUCKDB_VX_EXPR_TYPE")
         .rustified_enum("DUCKDB_VX_TABLE_FILTER_TYPE")
+        .rustified_enum("DUCKDB_VX_TABLE_FILTER_MATCH")
         .rustified_non_exhaustive_enum("DUCKDB_TYPE")
         .size_t_is_usize(true)
         .clang_arg(format!("-I{}", duckdb_include_dir.display()))

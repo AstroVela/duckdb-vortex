@@ -56,7 +56,7 @@ fn resolve_filesystem(glob_url: &Url) -> VortexResult<(FileSystemRef, String)> {
     if glob_url.scheme() == "file" {
         return Ok((
             Arc::new(ObjectStoreFileSystem::local(RUNTIME.handle())),
-            glob_url.path().to_string(),
+            glob_url.path().trim_start_matches('/').to_string(),
         ));
     }
 
@@ -76,7 +76,9 @@ fn resolve_filesystem(glob_url: &Url) -> VortexResult<(FileSystemRef, String)> {
             Arc::new(Compat::new(object_store)),
             RUNTIME.handle(),
         )),
-        path.to_string(),
+        // Match MultiFileDataSource::with_glob: ObjectStoreFileSystem paths
+        // are relative to the store root, including for absolute file:// URLs.
+        path.to_string().trim_start_matches('/').to_string(),
     ))
 }
 
@@ -194,7 +196,11 @@ pub fn bind_multi_file_scan(input: &BindInputRef) -> VortexResult<BoundMultiFile
         let mut files = Vec::new();
         for glob_url in &glob_urls {
             let (fs, glob) = resolve_filesystem(glob_url)?;
-            let listings = fs.glob(&glob)?.try_collect::<Vec<_>>().await?;
+            let mut listings = fs.glob(&glob)?.try_collect::<Vec<_>>().await?;
+            // FileSystem::list does not promise an order. Freeze a canonical
+            // order per user-supplied glob so file_index and task_id remain
+            // stable across independent binds and retries.
+            listings.sort();
             files.extend(listings.into_iter().map(|listing| BoundFile {
                 source_url: glob_url.to_string(),
                 path: listing.path,

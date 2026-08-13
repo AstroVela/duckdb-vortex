@@ -16,6 +16,8 @@ use vortex::error::VortexResult;
 use vortex::io::runtime::BlockingRuntime;
 use vortex::io::runtime::current::CurrentThreadRuntime;
 use vortex::io::session::RuntimeSessionExt;
+use vortex::scalar_fn::fns::byte_length::ByteLength;
+use vortex::scalar_fn::session::ScalarFnSessionExt;
 use vortex::session::VortexSession;
 
 use crate::duckdb::Database;
@@ -46,6 +48,10 @@ mod e2e_test;
 static RUNTIME: LazyLock<CurrentThreadRuntime> = LazyLock::new(CurrentThreadRuntime::new);
 static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
     let session = VortexSession::default().with_handle(RUNTIME.handle());
+    // ByteLength is constructible through `vortex::expr::byte_length`, but it is not part of
+    // Vortex's default scalar-function registry. Register it explicitly so expressions pushed
+    // into a scan can survive bind-data serialization and worker-plan deserialization.
+    session.scalar_fns().register(ByteLength);
     vortex_geo::initialize(&session);
     session
 });

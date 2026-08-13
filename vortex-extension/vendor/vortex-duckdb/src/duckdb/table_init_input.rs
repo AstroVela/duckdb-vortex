@@ -53,4 +53,8 @@ impl<'a> TableInitInput<'a> {
             Some(unsafe { TableFilterSet::borrow(ptr) })
         }
     }
+
+    pub fn ignore_optional_filters(&self) -> bool {
+        self.input.ignore_optional_filters
+    }
 }

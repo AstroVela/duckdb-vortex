@@ -45,7 +45,7 @@ fi
 # (Optionally) Sign binary
 if [ "$DUCKDB_EXTENSION_SIGNING_PK" != "" ]; then
   echo "$DUCKDB_EXTENSION_SIGNING_PK" > private.pem
-  $script_dir/../duckdb/scripts/compute-extension-hash.sh $ext.append > $ext.hash
+  "$script_dir/../vane/external/duckdb/scripts/compute-extension-hash.sh" "$ext.append" > "$ext.hash"
   openssl pkeyutl -sign -in $ext.hash -inkey private.pem -pkeyopt digest:sha256 -out $ext.sign
   rm -f private.pem
 fi

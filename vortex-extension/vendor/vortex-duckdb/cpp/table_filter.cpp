@@ -2,10 +2,14 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 #include "table_filter.h"
+#include "error.hpp"
 #include <mutex>
 
+#include "duckdb/common/value_operations/value_operations.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/planner/table_filter.hpp"
 #include "duckdb/planner/filter/conjunction_filter.hpp"
+#include "duckdb/planner/filter/constant_filter.hpp"
 #include "duckdb/planner/filter/dynamic_filter.hpp"
 #include "duckdb/planner/filter/optional_filter.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
@@ -90,14 +94,24 @@ extern "C" void duckdb_vx_table_filter_get_dynamic(duckdb_vx_table_filter ffi_fi
     if (!ffi_filter || !out) {
         return;
     }
+    out->data = nullptr;
+    out->comparison_type = DUCKDB_VX_EXPR_TYPE_INVALID;
     auto &filter = reinterpret_cast<TableFilter *>(ffi_filter)->Cast<DynamicFilter>();
+    if (!filter.filter_data) {
+        // Physical-plan deserialization intentionally reconstructs dynamic
+        // filters without their connection-scoped runtime data. The optional
+        // wrapper can then conservatively ignore this unavailable hint.
+        return;
+    }
 
     // Hold the lock while accessing the filter data.
     std::lock_guard<std::mutex> lock(filter.filter_data->lock);
 
     auto data_wrapper = make_uniq<DynamicFilterDataWrapper>(filter.filter_data);
     out->data = reinterpret_cast<duckdb_vx_dynamic_filter_data>(data_wrapper.release());
-    out->comparison_type = static_cast<duckdb_vx_expr_type>(filter.filter_data->filter->comparison_type);
+    if (filter.filter_data->filter) {
+        out->comparison_type = static_cast<duckdb_vx_expr_type>(filter.filter_data->filter->comparison_type);
+    }
 }
 
 extern "C" void duckdb_vx_dynamic_filter_data_free(duckdb_vx_dynamic_filter_data *ffi_data) {
@@ -176,4 +190,104 @@ extern "C" duckdb_value duckdb_vx_values_vec_get(duckdb_vx_values_vec ffi_vec, s
         return nullptr;
     }
     return reinterpret_cast<duckdb_value>(&(*vec)[idx]);
+}
+
+namespace {
+
+duckdb_vx_table_filter_match
+MatchUBigInt(TableFilter &filter, optional_ptr<ClientContext> context, const Value &value) {
+    switch (filter.filter_type) {
+    case TableFilterType::CONSTANT_COMPARISON:
+        return filter.Cast<ConstantFilter>().Compare(value) ? DUCKDB_VX_TABLE_FILTER_MATCH_TRUE
+                                                            : DUCKDB_VX_TABLE_FILTER_MATCH_FALSE;
+    case TableFilterType::IS_NULL:
+        return DUCKDB_VX_TABLE_FILTER_MATCH_FALSE;
+    case TableFilterType::IS_NOT_NULL:
+        return DUCKDB_VX_TABLE_FILTER_MATCH_TRUE;
+    case TableFilterType::CONJUNCTION_AND: {
+        bool unknown = false;
+        for (auto &child : filter.Cast<ConjunctionAndFilter>().child_filters) {
+            const auto result = MatchUBigInt(*child, context, value);
+            if (result == DUCKDB_VX_TABLE_FILTER_MATCH_FALSE) {
+                return result;
+            }
+            unknown |= result == DUCKDB_VX_TABLE_FILTER_MATCH_UNKNOWN;
+        }
+        return unknown ? DUCKDB_VX_TABLE_FILTER_MATCH_UNKNOWN : DUCKDB_VX_TABLE_FILTER_MATCH_TRUE;
+    }
+    case TableFilterType::CONJUNCTION_OR: {
+        bool unknown = false;
+        for (auto &child : filter.Cast<ConjunctionOrFilter>().child_filters) {
+            const auto result = MatchUBigInt(*child, context, value);
+            if (result == DUCKDB_VX_TABLE_FILTER_MATCH_TRUE) {
+                return result;
+            }
+            unknown |= result == DUCKDB_VX_TABLE_FILTER_MATCH_UNKNOWN;
+        }
+        return unknown ? DUCKDB_VX_TABLE_FILTER_MATCH_UNKNOWN : DUCKDB_VX_TABLE_FILTER_MATCH_FALSE;
+    }
+    case TableFilterType::OPTIONAL_FILTER:
+        // Optional filters are pruning hints and are not required for query
+        // correctness. Treating them as a match cannot remove real rows.
+        return DUCKDB_VX_TABLE_FILTER_MATCH_TRUE;
+    case TableFilterType::IN_FILTER:
+        for (const auto &candidate : filter.Cast<InFilter>().values) {
+            if (ValueOperations::Equals(value, candidate)) {
+                return DUCKDB_VX_TABLE_FILTER_MATCH_TRUE;
+            }
+        }
+        return DUCKDB_VX_TABLE_FILTER_MATCH_FALSE;
+    case TableFilterType::DYNAMIC_FILTER: {
+        auto &dynamic = filter.Cast<DynamicFilter>();
+        if (!dynamic.filter_data) {
+            return DUCKDB_VX_TABLE_FILTER_MATCH_TRUE;
+        }
+        std::lock_guard<std::mutex> lock(dynamic.filter_data->lock);
+        if (!dynamic.filter_data->initialized || !dynamic.filter_data->filter) {
+            return DUCKDB_VX_TABLE_FILTER_MATCH_TRUE;
+        }
+        return dynamic.filter_data->filter->Compare(value) ? DUCKDB_VX_TABLE_FILTER_MATCH_TRUE
+                                                           : DUCKDB_VX_TABLE_FILTER_MATCH_FALSE;
+    }
+    case TableFilterType::EXPRESSION_FILTER:
+        if (!context) {
+            return DUCKDB_VX_TABLE_FILTER_MATCH_UNKNOWN;
+        }
+        return filter.Cast<ExpressionFilter>().EvaluateWithConstant(*context, value)
+                   ? DUCKDB_VX_TABLE_FILTER_MATCH_TRUE
+                   : DUCKDB_VX_TABLE_FILTER_MATCH_FALSE;
+    case TableFilterType::STRUCT_EXTRACT:
+        return DUCKDB_VX_TABLE_FILTER_MATCH_UNKNOWN;
+    case TableFilterType::BLOOM_FILTER:
+        // Bloom filters are optional pruning hints. Ignoring one may retain
+        // false positives, but the join that supplied it still enforces the
+        // query predicate.
+        return DUCKDB_VX_TABLE_FILTER_MATCH_TRUE;
+    }
+    return DUCKDB_VX_TABLE_FILTER_MATCH_UNKNOWN;
+}
+
+} // namespace
+
+extern "C" duckdb_vx_table_filter_match
+duckdb_vx_table_filter_matches_ubigint(duckdb_vx_table_filter ffi_filter,
+                                       duckdb_client_context ffi_context,
+                                       uint64_t value,
+                                       duckdb_vx_error *error_out) {
+    if (error_out) {
+        *error_out = nullptr;
+    }
+    if (!ffi_filter) {
+        return DUCKDB_VX_TABLE_FILTER_MATCH_UNKNOWN;
+    }
+    try {
+        auto &filter = *reinterpret_cast<TableFilter *>(ffi_filter);
+        auto context = reinterpret_cast<ClientContext *>(ffi_context);
+        return MatchUBigInt(filter, context, Value::UBIGINT(value));
+    } catch (const std::exception &error) {
+        if (error_out) {
+            SetError(error_out, error.what());
+        }
+        return DUCKDB_VX_TABLE_FILTER_MATCH_UNKNOWN;
+    }
 }

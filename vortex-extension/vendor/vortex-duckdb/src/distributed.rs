@@ -129,7 +129,14 @@ fn decode_aggregate(aggregate: AggregateProto) -> VortexResult<ColumnAggregate> 
         4 => PushedAggregate::Mean,
         5 => PushedAggregate::First,
         6 => PushedAggregate::Count,
-        7 => return Ok(ColumnAggregate::CountStar),
+        7 => {
+            if aggregate.projection_id != 0 {
+                vortex_bail!(
+                    "Distributed Vortex count-star aggregate has an invalid projection id"
+                );
+            }
+            return Ok(ColumnAggregate::CountStar);
+        }
         kind => vortex_bail!("Unknown distributed Vortex aggregate kind: {kind}"),
     };
     Ok(ColumnAggregate::Real {

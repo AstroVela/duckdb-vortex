@@ -51,6 +51,10 @@ struct VortexBindData final : FunctionData {
         string source_url;
         string path;
         optional_idx size;
+
+        bool operator==(const DistributedFile &other) const {
+            return source_url == other.source_url && path == other.path && size == other.size;
+        }
     };
 
     void RefreshPortableBind() const;
@@ -60,13 +64,16 @@ struct VortexBindData final : FunctionData {
     mutable bool aggregate_scan = false;
     bool explicit_task_mode = false;
     bool tasks_applied = false;
+    vector<idx_t> eligible_file_indexes;
     vector<idx_t> assigned_file_indexes;
 #endif
 };
 
 struct VortexGlobalData final : GlobalTableFunctionState {
-    explicit VortexGlobalData(unique_ptr<CData> ffi_data, bool distributed = false)
-        : ffi_data(std::move(ffi_data)), distributed(distributed) {
+    explicit VortexGlobalData(unique_ptr<CData> ffi_data,
+                              bool distributed = false,
+                              bool force_empty_output = false)
+        : ffi_data(std::move(ffi_data)), distributed(distributed), force_empty_output(force_empty_output) {
     }
 
     idx_t MaxThreads() const override {
@@ -75,6 +82,7 @@ struct VortexGlobalData final : GlobalTableFunctionState {
 
     unique_ptr<CData> ffi_data;
     bool distributed;
+    bool force_empty_output;
 };
 
 struct VortexLocalData final : LocalTableFunctionState {

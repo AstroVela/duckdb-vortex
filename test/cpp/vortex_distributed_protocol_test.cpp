@@ -108,6 +108,19 @@ AggregateRow ReadAggregateRow(QueryResult &result) {
 	        materialized->GetValue(2, 0).GetValue<int64_t>()};
 }
 
+void CheckEmptyAggregateRow(QueryResult &result) {
+	if (result.HasError()) {
+		throw std::runtime_error("empty aggregate query execution failed: " + result.GetError());
+	}
+	auto *materialized = dynamic_cast<MaterializedQueryResult *>(&result);
+	Check(materialized != nullptr, "expected a materialized empty aggregate result");
+	Check(materialized->ColumnCount() == 3 && materialized->RowCount() == 1,
+	      "expected one three-column empty aggregate row");
+	Check(materialized->GetValue(0, 0).IsNull() && materialized->GetValue(1, 0).IsNull() &&
+	          materialized->GetValue(2, 0).GetValue<int64_t>() == 0,
+	      "unexpected aggregate values for the empty input");
+}
+
 struct PlannedScan {
 	distributed::DuckPhysicalPlanRef worker_plan;
 	vector<distributed::ScanTaskDescriptor> descriptors;
@@ -124,19 +137,24 @@ void FindTableScans(PhysicalOperator &op, vector<reference<PhysicalTableScan>> &
 	}
 }
 
-PlannedScan PlanScan(DuckDB &database, Connection &connection, const string &sql, idx_t worker_slots,
-                     const vector<LogicalType> &result_types, const vector<string> &result_names) {
+distributed::DuckPhysicalPlanRef ExtractPhysicalPlan(Connection &connection, const string &sql) {
 	auto logical_plan = connection.ExtractPlan(sql);
 	Check(logical_plan != nullptr, "failed to extract the Vortex logical plan");
 	PhysicalPlanGenerator generator(*connection.context);
 	auto generated_plan = generator.Plan(std::move(logical_plan));
 	Check(generated_plan != nullptr, "failed to generate the Vortex physical plan");
-	auto coordinator_plan = distributed::DuckPhysicalPlanRef(generated_plan.release());
+	return distributed::DuckPhysicalPlanRef(generated_plan.release());
+}
+
+PlannedScan PlanScan(DuckDB &database, Connection &connection, const string &sql, idx_t worker_slots,
+                     const vector<LogicalType> &result_types, const vector<string> &result_names,
+                     const string &function_name = "read_vortex") {
+	auto coordinator_plan = ExtractPhysicalPlan(connection, sql);
 	vector<reference<PhysicalTableScan>> table_scans;
 	FindTableScans(coordinator_plan->Root(), table_scans);
 	Check(table_scans.size() == 1, "predicate/projection query did not contain exactly one PhysicalTableScan");
 	auto &coordinator_scan = table_scans.front().get();
-	Check(coordinator_scan.function.name == "read_vortex", "planned the wrong table function");
+	Check(coordinator_scan.function.name == function_name, "planned the wrong table function");
 	Check(coordinator_scan.GetTypes().size() == result_types.size(),
 	      "standalone Vortex scan changed the projected column count");
 	Check(coordinator_scan.function.HasSerializationCallbacks(), "Vortex bind serde is not registered");
@@ -165,6 +183,14 @@ unique_ptr<PhysicalPlan> ClonePlan(const distributed::DuckPhysicalPlanRef &sourc
 	auto &scan = plan->Root().Cast<PhysicalTableScan>();
 	scan.extra_info.scan_node_id = optional_idx(scan_node_id);
 	scan.extra_info.scan_group_id = optional_idx(scan_node_id);
+	return plan;
+}
+
+unique_ptr<PhysicalPlan> CloneNativePlan(const distributed::DuckPhysicalPlanRef &source, Connection &worker) {
+	auto plan = make_uniq<PhysicalPlan>(Allocator::DefaultAllocator());
+	auto &root = distributed::ClonePhysicalPlanRootIntoPlanOrThrow(source, *plan, "vortex native round-trip clone",
+	                                                               worker.context.get());
+	plan->SetRoot(root);
 	return plan;
 }
 
@@ -215,6 +241,18 @@ AggregateRow ExecuteAggregateAssigned(const PlannedScan &planned, Connection &wo
 	return ReadAggregateRow(*result);
 }
 
+idx_t ExecuteAssignedRowCount(const PlannedScan &planned, Connection &worker,
+                              const distributed::ScanTaskDescriptor &descriptor, idx_t scan_node_id) {
+	auto plan = ClonePlan(planned.worker_plan, worker, scan_node_id);
+	ApplyDescriptor(*plan, scan_node_id, descriptor);
+	auto result = ExecutePlan(worker, std::move(plan), planned.result_types, planned.result_names,
+	                          "test:vortex-distributed-row-count");
+	Check(result != nullptr && !result->HasError(), "row-count worker execution failed");
+	auto *materialized = dynamic_cast<MaterializedQueryResult *>(result.get());
+	Check(materialized != nullptr, "expected a materialized row-count result");
+	return materialized->RowCount();
+}
+
 void RecomputeDescriptorEstimates(distributed::ScanTaskDescriptor &descriptor) {
 	descriptor.estimated_cardinality = 0;
 	descriptor.estimated_bytes = 0;
@@ -247,7 +285,8 @@ void ExpectApplyFailure(const PlannedScan &planned, Connection &worker,
 	}
 }
 
-void ValidateDescriptorContract(const vector<distributed::ScanTaskDescriptor> &descriptors, idx_t file_count) {
+void ValidateDescriptorContract(const vector<distributed::ScanTaskDescriptor> &descriptors, idx_t file_count,
+                                const string &capability_name = "read_vortex") {
 	Check(!descriptors.empty(), "Vortex planner returned no descriptors");
 	set<string> task_ids;
 	idx_t elementary_count = 0;
@@ -255,7 +294,7 @@ void ValidateDescriptorContract(const vector<distributed::ScanTaskDescriptor> &d
 		Check(descriptor.kind == distributed::ScanTaskKind::EXTENSION, "Vortex emitted a non-extension task");
 		Check(descriptor.files.empty(), "Vortex extension task unexpectedly contains file tasks");
 		Check(descriptor.extension_capability.extension_name == "vortex", "wrong Vortex capability owner");
-		Check(descriptor.extension_capability.capability.name == "read_vortex", "wrong Vortex capability name");
+		Check(descriptor.extension_capability.capability.name == capability_name, "wrong Vortex capability name");
 		Check(descriptor.extension_capability.capability.protocol_version == 1, "wrong Vortex protocol version");
 		Check(descriptor.task_codec.name == "vane.vortex-file-task", "wrong Vortex task codec");
 		Check(descriptor.task_codec.version == 1, "wrong Vortex task codec version");
@@ -301,6 +340,33 @@ void TestProtocol() {
 		file_list += SQLString(files[file_index]);
 	}
 	file_list += "]";
+
+	// DuckDB late materialization rewrites one scan into a self semi-join.
+	// Vane schedules explicit tasks per physical scan, so a distributed-capable
+	// Vortex function must retain one scan until grouped multi-scan assignments
+	// are part of the protocol.
+	const auto limited_sql = "SELECT id, payload FROM read_vortex(" + file_list + ") ORDER BY id DESC LIMIT 3";
+	auto limited_physical_plan = ExtractPhysicalPlan(coordinator, limited_sql);
+	vector<reference<PhysicalTableScan>> limited_scans;
+	FindTableScans(limited_physical_plan->Root(), limited_scans);
+	Check(limited_scans.size() == 1, "distributed Vortex scan enabled unsafe late materialization");
+	auto limited_result = coordinator.Query(limited_sql);
+	Check(limited_result != nullptr && !limited_result->HasError() && limited_result->RowCount() == 3,
+	      "single-scan limited Vortex baseline failed");
+	auto limited_scan =
+	    PlanScan(coordinator_database, coordinator, limited_sql, 8, limited_result->types, limited_result->names);
+	ValidateDescriptorContract(limited_scan.descriptors, files.size());
+	const auto filtered_limited_sql =
+	    "SELECT id, payload FROM read_vortex(" + file_list + ") WHERE id < 15 ORDER BY id DESC LIMIT 3";
+	auto filtered_limited_physical_plan = ExtractPhysicalPlan(coordinator, filtered_limited_sql);
+	auto filtered_limited_result = coordinator.Query(filtered_limited_sql);
+	Check(filtered_limited_result != nullptr && !filtered_limited_result->HasError() &&
+	          filtered_limited_result->RowCount() == 3,
+	      "filtered limited Vortex baseline failed");
+	auto filtered_limited_scan = PlanScan(coordinator_database, coordinator, filtered_limited_sql, 8,
+	                                      filtered_limited_result->types, filtered_limited_result->names);
+	ValidateDescriptorContract(filtered_limited_scan.descriptors, files.size());
+
 	const auto scan_sql = "SELECT id, file_index FROM read_vortex(" + file_list + ") WHERE id >= 7 AND id < 25";
 	auto baseline_result = coordinator.Query(scan_sql);
 	Check(baseline_result != nullptr && !baseline_result->HasError(), "local Vortex baseline failed");
@@ -325,6 +391,109 @@ void TestProtocol() {
 	DuckDB worker_database(nullptr);
 	worker_database.LoadStaticExtension<VortexExtension>();
 	Connection worker(worker_database);
+	// DuckDB deliberately deserializes DynamicFilter without its
+	// connection-scoped filter_data. A complete native TopN plan must treat that
+	// optional hint as unavailable, not dereference it or reject every row.
+	auto limited_native_plan = CloneNativePlan(limited_physical_plan, worker);
+	auto limited_native_result = ExecutePlan(worker, std::move(limited_native_plan), limited_result->types,
+	                                         limited_result->names, "test:vortex-native-topn-roundtrip");
+	Check(limited_native_result != nullptr && !limited_native_result->HasError(),
+	      "native TopN Vortex physical-plan round-trip failed");
+	auto *limited_native_materialized = dynamic_cast<MaterializedQueryResult *>(limited_native_result.get());
+	Check(limited_native_materialized != nullptr && limited_native_materialized->RowCount() == 3,
+	      "native TopN Vortex physical-plan round-trip returned the wrong row count");
+	auto filtered_limited_native_plan = CloneNativePlan(filtered_limited_physical_plan, worker);
+	auto filtered_limited_native_result =
+	    ExecutePlan(worker, std::move(filtered_limited_native_plan), filtered_limited_result->types,
+	                filtered_limited_result->names, "test:vortex-native-filtered-topn-roundtrip");
+	Check(filtered_limited_native_result != nullptr && !filtered_limited_native_result->HasError(),
+	      "native filtered TopN Vortex physical-plan round-trip failed");
+	auto *filtered_limited_native_materialized =
+	    dynamic_cast<MaterializedQueryResult *>(filtered_limited_native_result.get());
+	Check(filtered_limited_native_materialized != nullptr && filtered_limited_native_materialized->RowCount() == 3 &&
+	          filtered_limited_native_materialized->GetValue(0, 0).GetValue<int64_t>() == 14 &&
+	          filtered_limited_native_materialized->GetValue(0, 1).GetValue<int64_t>() == 13 &&
+	          filtered_limited_native_materialized->GetValue(0, 2).GetValue<int64_t>() == 12,
+	      "native filtered TopN Vortex physical-plan round-trip dropped its required predicate");
+	idx_t limited_scan_rows = 0;
+	for (idx_t descriptor_index = 0; descriptor_index < limited_scan.descriptors.size(); descriptor_index++) {
+		limited_scan_rows += ExecuteAssignedRowCount(limited_scan, worker, limited_scan.descriptors[descriptor_index],
+		                                             25 + descriptor_index);
+	}
+	Check(limited_scan_rows == files.size() * 10, "detached TopN scan incorrectly applied an optional dynamic filter");
+	idx_t filtered_limited_scan_rows = 0;
+	for (idx_t descriptor_index = 0; descriptor_index < filtered_limited_scan.descriptors.size(); descriptor_index++) {
+		filtered_limited_scan_rows += ExecuteAssignedRowCount(
+		    filtered_limited_scan, worker, filtered_limited_scan.descriptors[descriptor_index], 35 + descriptor_index);
+	}
+	Check(filtered_limited_scan_rows == 15,
+	      "ignoring a detached TopN dynamic filter also dropped its required sibling predicate");
+
+	// The Vortex-owned bind path must retain ordinary absolute-path glob
+	// semantics. Canonical sorting also makes the file index and task payload
+	// stable even when the underlying object store lists entries out of order.
+	const auto glob_scan_sql = "SELECT id, file_index FROM read_vortex(" + SQLString(temp.path / "part-*.vortex") +
+	                           ") WHERE id >= 7 AND id < 25";
+	auto glob_baseline_result = coordinator.Query(glob_scan_sql);
+	Check(glob_baseline_result != nullptr && !glob_baseline_result->HasError(),
+	      "absolute-path Vortex glob baseline failed");
+	auto glob_baseline_rows = ReadRows(*glob_baseline_result);
+	Check(glob_baseline_rows == baseline_rows, "absolute-path Vortex glob changed local file ordering or results");
+	auto glob_plan = PlanScan(coordinator_database, coordinator, glob_scan_sql, 8, glob_baseline_result->types,
+	                          glob_baseline_result->names);
+	ValidateDescriptorContract(glob_plan.descriptors, files.size());
+	vector<ResultRow> glob_distributed_rows;
+	for (idx_t descriptor_index = 0; descriptor_index < glob_plan.descriptors.size(); descriptor_index++) {
+		const auto &descriptor = glob_plan.descriptors[descriptor_index];
+		Check(descriptor.extension_tasks.size() == 1, "glob task assignment was unexpectedly merged");
+		const auto &task = descriptor.extension_tasks.front();
+		Check(task.payload.find("part-" + task.task_id + ".vortex") != string::npos,
+		      "glob task id does not match its canonically sorted file payload");
+		auto rows = ExecuteAssigned(glob_plan, worker, descriptor, 50 + descriptor_index);
+		glob_distributed_rows.insert(glob_distributed_rows.end(), rows.begin(), rows.end());
+	}
+	std::sort(glob_distributed_rows.begin(), glob_distributed_rows.end());
+	Check(glob_distributed_rows == baseline_rows, "distributed absolute-path Vortex glob differs from baseline");
+
+	// Both public scan names are registered through the same legacy C API path,
+	// but each must publish its own Vane capability and remain executable after
+	// worker-plan cloning.
+	const auto alias_sql = "SELECT id, file_index FROM vortex_scan(" + file_list + ") WHERE id >= 7 AND id < 25";
+	auto alias_baseline_result = coordinator.Query(alias_sql);
+	Check(alias_baseline_result != nullptr && !alias_baseline_result->HasError(), "vortex_scan alias baseline failed");
+	auto alias_plan = PlanScan(coordinator_database, coordinator, alias_sql, 8, alias_baseline_result->types,
+	                           alias_baseline_result->names, "vortex_scan");
+	ValidateDescriptorContract(alias_plan.descriptors, files.size(), "vortex_scan");
+	vector<ResultRow> alias_distributed_rows;
+	for (idx_t descriptor_index = 0; descriptor_index < alias_plan.descriptors.size(); descriptor_index++) {
+		auto rows =
+		    ExecuteAssigned(alias_plan, worker, alias_plan.descriptors[descriptor_index], 75 + descriptor_index);
+		alias_distributed_rows.insert(alias_distributed_rows.end(), rows.begin(), rows.end());
+	}
+	std::sort(alias_distributed_rows.begin(), alias_distributed_rows.end());
+	Check(alias_distributed_rows == baseline_rows, "distributed vortex_scan alias differs from baseline");
+
+	// Ordinary DuckDB plan serialization uses the same bind serde without
+	// invoking Vane's prepare_bind callback. Deserialization must remain I/O-free,
+	// then reconstruct the complete already-bound file set in the real execution
+	// context instead of requiring a distributed descriptor.
+	auto native_source = ExtractPhysicalPlan(coordinator, scan_sql);
+	auto native_types = native_source->Root().GetTypes();
+	auto native_hidden_path = temp.path;
+	native_hidden_path += ".native-hidden";
+	std::filesystem::rename(temp.path, native_hidden_path);
+	unique_ptr<PhysicalPlan> native_roundtrip_plan;
+	try {
+		native_roundtrip_plan = CloneNativePlan(native_source, worker);
+		std::filesystem::rename(native_hidden_path, temp.path);
+	} catch (...) {
+		std::filesystem::rename(native_hidden_path, temp.path);
+		throw;
+	}
+	auto native_roundtrip_result = ExecutePlan(worker, std::move(native_roundtrip_plan), native_types, baseline_names,
+	                                           "test:vortex-native-roundtrip");
+	Check(native_roundtrip_result != nullptr && ReadRows(*native_roundtrip_result) == baseline_rows,
+	      "native Vortex physical-plan round-trip differs from baseline");
 
 	// Clone while the data directory is unavailable. A hidden call to the
 	// original bind would attempt to enumerate these paths and fail. The worker
@@ -351,6 +520,38 @@ void TestProtocol() {
 	                                "test:vortex-distributed-retry-clone");
 	Check(retry_result != nullptr && !retry_result->HasError(), "retry clone execution failed");
 
+	// Re-applying the identical assignment is idempotent, while changing an
+	// already-applied bind in place must fail. FTE retries clone the detached
+	// plan; they never mutate one execution from file A into file B.
+	Check(planned.descriptors.size() > 1, "expected multiple descriptors for reassignment test");
+	auto idempotent_plan = ClonePlan(planned.worker_plan, worker, 125);
+	ApplyDescriptor(*idempotent_plan, 125, planned.descriptors[0]);
+	ApplyDescriptor(*idempotent_plan, 125, planned.descriptors[0]);
+	string reassignment_error;
+	try {
+		ApplyDescriptor(*idempotent_plan, 125, planned.descriptors[1]);
+	} catch (const std::exception &error) {
+		reassignment_error = error.what();
+	}
+	Check(StringUtil::Contains(reassignment_error, "different explicit task assignment"),
+	      "Vortex accepted a different assignment on an already-applied bind: " + reassignment_error);
+
+	// File identity is resolved only from the descriptor and immutable bind. If
+	// the bound object disappears before a retry, fail explicitly instead of
+	// re-globbing a replacement or widening the scan.
+	auto missing_file = files[0];
+	missing_file += ".missing";
+	std::filesystem::rename(files[0], missing_file);
+	string missing_file_error;
+	try {
+		(void)ExecuteAssigned(planned, worker, planned.descriptors.front(), 150);
+	} catch (const std::exception &error) {
+		missing_file_error = error.what();
+	}
+	std::filesystem::rename(missing_file, files[0]);
+	Check(StringUtil::Contains(missing_file_error, "no longer exists"),
+	      "missing bound Vortex file did not fail with an identity error: " + missing_file_error);
+
 	vector<ResultRow> distributed_rows;
 	for (idx_t descriptor_index = 0; descriptor_index < planned.descriptors.size(); descriptor_index++) {
 		auto roundtrip = distributed::ScanTaskDescriptor::DeserializeFromBytes(
@@ -360,6 +561,29 @@ void TestProtocol() {
 	}
 	std::sort(distributed_rows.begin(), distributed_rows.end());
 	Check(distributed_rows == baseline_rows, "per-file worker results do not equal the local Vortex scan");
+
+	// Exercise state that exists only in the Vortex bind: strlen projection
+	// pushdown and a LIKE complex filter that DuckDB removes from the upper plan.
+	// Both expressions must survive bind serde without a worker rebind.
+	const auto expression_sql =
+	    "SELECT strlen(payload), file_index FROM read_vortex(" + file_list + ") WHERE payload LIKE '%2%'";
+	auto expression_baseline_result = coordinator.Query(expression_sql);
+	Check(expression_baseline_result != nullptr && !expression_baseline_result->HasError(),
+	      "projection/complex-filter local Vortex baseline failed");
+	auto expression_baseline_rows = ReadRows(*expression_baseline_result);
+	Check(expression_baseline_rows.size() == 12, "unexpected projection/complex-filter baseline cardinality");
+	auto expression_plan = PlanScan(coordinator_database, coordinator, expression_sql, 8,
+	                                expression_baseline_result->types, expression_baseline_result->names);
+	ValidateDescriptorContract(expression_plan.descriptors, files.size());
+	vector<ResultRow> expression_rows;
+	for (idx_t descriptor_index = 0; descriptor_index < expression_plan.descriptors.size(); descriptor_index++) {
+		auto rows = ExecuteAssigned(expression_plan, worker, expression_plan.descriptors[descriptor_index],
+		                            225 + descriptor_index);
+		expression_rows.insert(expression_rows.end(), rows.begin(), rows.end());
+	}
+	std::sort(expression_rows.begin(), expression_rows.end());
+	Check(expression_rows == expression_baseline_rows,
+	      "distributed projection/complex-filter result differs from baseline");
 
 	// A file_index predicate can be evaluated without opening readers. The
 	// coordinator must omit files that cannot match while preserving the stable
@@ -380,6 +604,41 @@ void TestProtocol() {
 	      "file_index pruning changed the stable coordinator task id");
 	Check(ExecuteAssigned(pruned, worker, pruned.descriptors[0], 250) == pruned_baseline_rows,
 	      "file_index-pruned worker result differs from baseline");
+	// A descriptor can be structurally valid and reference a file from the same
+	// immutable bind while still being outside this scan's coordinator-pruned
+	// task set. Applying such a descriptor must fail rather than broaden the
+	// worker scan.
+	ExpectApplyFailure(pruned, worker, planned.descriptors.front(), "outside the planned file set");
+
+	// Non-range virtual filters must be evaluated rather than silently treated
+	// as Selection::All. Both task planning and runtime reader construction use
+	// the same exact file-index predicate evaluation.
+	const auto not_equal_sql = "SELECT id, file_index FROM read_vortex(" + file_list + ") WHERE file_index != 1";
+	auto not_equal_baseline_result = coordinator.Query(not_equal_sql);
+	Check(not_equal_baseline_result != nullptr && !not_equal_baseline_result->HasError(),
+	      "file_index-not-equal local Vortex baseline failed");
+	auto not_equal_baseline_rows = ReadRows(*not_equal_baseline_result);
+	Check(not_equal_baseline_rows.size() == 20, "file_index-not-equal local filter returned the wrong row count");
+	auto not_equal = PlanScan(coordinator_database, coordinator, not_equal_sql, 8, not_equal_baseline_result->types,
+	                          not_equal_baseline_result->names);
+	ValidateDescriptorContract(not_equal.descriptors, 2);
+	Check(not_equal.descriptors.size() == 2 && not_equal.descriptors[0].extension_tasks[0].task_id == "0" &&
+	          not_equal.descriptors[1].extension_tasks[0].task_id == "2",
+	      "file_index-not-equal predicate planned the wrong task set");
+	vector<ResultRow> not_equal_rows;
+	for (idx_t descriptor_index = 0; descriptor_index < not_equal.descriptors.size(); descriptor_index++) {
+		auto rows = ExecuteAssigned(not_equal, worker, not_equal.descriptors[descriptor_index], 260 + descriptor_index);
+		not_equal_rows.insert(not_equal_rows.end(), rows.begin(), rows.end());
+	}
+	std::sort(not_equal_rows.begin(), not_equal_rows.end());
+	Check(not_equal_rows == not_equal_baseline_rows, "file_index-not-equal distributed result differs from baseline");
+	ExpectApplyFailure(not_equal, worker, planned.descriptors[1], "outside the planned file set");
+
+	const auto row_number_sql =
+	    "SELECT id, file_row_number FROM read_vortex(" + file_list + ") WHERE file_row_number != 0";
+	auto row_number_result = coordinator.Query(row_number_sql);
+	Check(row_number_result != nullptr && !row_number_result->HasError(), "file_row_number fallback filter failed");
+	Check(ReadRows(*row_number_result).size() == 27, "file_row_number fallback filter returned the wrong row count");
 
 	// If coordinator pruning removes every file, Vane still transports one
 	// legal extension descriptor with an empty elementary-task array.
@@ -403,18 +662,26 @@ void TestProtocol() {
 	      "merged descriptor does not contain every file task");
 	Check(ExecuteAssigned(merged, worker, merged.descriptors[0], 300) == baseline_rows,
 	      "merged Vortex task result differs from baseline");
+	auto reordered_merged = merged.descriptors[0];
+	std::reverse(reordered_merged.extension_tasks.begin(), reordered_merged.extension_tasks.end());
+	auto reordered_plan = ClonePlan(merged.worker_plan, worker, 301);
+	ApplyDescriptor(*reordered_plan, 301, merged.descriptors[0]);
+	ApplyDescriptor(*reordered_plan, 301, reordered_merged);
+	auto reordered_result = ExecutePlan(worker, std::move(reordered_plan), baseline_types, baseline_names,
+	                                    "test:vortex-distributed-reordered-assignment");
+	Check(reordered_result != nullptr && ReadRows(*reordered_result) == baseline_rows,
+	      "reordering a merged Vortex assignment changed its meaning");
 
 	// Vortex removes the upper aggregate operator when all aggregates are
 	// pushed into its scan. Such a scan must stay one elementary task containing
-	// the complete pruned file set; otherwise workers would emit unmergeable
+	// the complete bound file set; otherwise workers would emit unmergeable
 	// per-file final aggregates.
-	const auto aggregate_sql =
-	    "SELECT min(id), max(id), count(id) FROM read_vortex(" + file_list + ") WHERE id >= 7 AND id < 25";
+	const auto aggregate_sql = "SELECT min(id), max(id), count(id) FROM read_vortex(" + file_list + ")";
 	auto aggregate_baseline_result = coordinator.Query(aggregate_sql);
 	Check(aggregate_baseline_result != nullptr && !aggregate_baseline_result->HasError(),
 	      "aggregate-pushed local Vortex baseline failed");
 	auto aggregate_baseline = ReadAggregateRow(*aggregate_baseline_result);
-	Check(aggregate_baseline == AggregateRow {7, 24, 18}, "unexpected aggregate-pushed local baseline");
+	Check(aggregate_baseline == AggregateRow {0, 29, 30}, "unexpected aggregate-pushed local baseline");
 	auto aggregate_plan = PlanScan(coordinator_database, coordinator, aggregate_sql, 8,
 	                               aggregate_baseline_result->types, aggregate_baseline_result->names);
 	ValidateDescriptorContract(aggregate_plan.descriptors, 1);
@@ -424,6 +691,53 @@ void TestProtocol() {
 	      "aggregate-pushed Vortex task did not retain its complete stable file set");
 	Check(ExecuteAggregateAssigned(aggregate_plan, worker, aggregate_plan.descriptors[0], 325) == aggregate_baseline,
 	      "aggregate-pushed distributed Vortex result differs from baseline");
+	// A pushed aggregate is indivisible: accepting a valid single-file task in
+	// place of the complete planned file-set task would silently return a partial
+	// final aggregate.
+	ExpectApplyFailure(aggregate_plan, worker, planned.descriptors.front(), "complete planned file set");
+	auto empty_aggregate_descriptor = aggregate_plan.descriptors.front();
+	empty_aggregate_descriptor.extension_tasks.clear();
+	empty_aggregate_descriptor.estimated_cardinality = 0;
+	empty_aggregate_descriptor.estimated_bytes = 0;
+	Check(ExecuteAssignedRowCount(aggregate_plan, worker, empty_aggregate_descriptor, 326) == 0,
+	      "empty aggregate Vortex descriptor emitted an aggregate row");
+
+	// A complex filter can live exclusively in the portable Rust bind while the
+	// aggregate above it is also replaced by the Vortex scan. Exercise both
+	// pieces of state together, not only in independent queries.
+	const auto filtered_pushed_aggregate_sql =
+	    "SELECT min(id), max(id), count(id) FROM read_vortex(" + file_list + ") WHERE payload LIKE '%2%'";
+	auto filtered_pushed_aggregate_result = coordinator.Query(filtered_pushed_aggregate_sql);
+	Check(filtered_pushed_aggregate_result != nullptr && !filtered_pushed_aggregate_result->HasError(),
+	      "complex-filter aggregate-pushed local baseline failed");
+	auto filtered_pushed_aggregate_baseline = ReadAggregateRow(*filtered_pushed_aggregate_result);
+	Check(filtered_pushed_aggregate_baseline == AggregateRow {2, 29, 12},
+	      "unexpected complex-filter aggregate-pushed baseline");
+	auto filtered_pushed_aggregate_plan =
+	    PlanScan(coordinator_database, coordinator, filtered_pushed_aggregate_sql, 8,
+	             filtered_pushed_aggregate_result->types, filtered_pushed_aggregate_result->names);
+	ValidateDescriptorContract(filtered_pushed_aggregate_plan.descriptors, 1);
+	Check(filtered_pushed_aggregate_plan.descriptors.size() == 1 &&
+	          filtered_pushed_aggregate_plan.descriptors[0].extension_tasks[0].task_id == "0,1,2",
+	      "complex-filter aggregate was not preserved as one complete Vortex task");
+	Check(ExecuteAggregateAssigned(filtered_pushed_aggregate_plan, worker,
+	                               filtered_pushed_aggregate_plan.descriptors[0],
+	                               327) == filtered_pushed_aggregate_baseline,
+	      "complex-filter aggregate-pushed distributed Vortex result differs from baseline");
+
+	// Aggregate pushdown cannot preserve DuckDB table-filter column identities:
+	// the rewrite replaces the scan column IDs with aggregate output positions.
+	// Keep a filtered aggregate above the scan, including for virtual filters,
+	// so a fully pruned scan still produces the correct SQL aggregate identity.
+	const auto empty_aggregate_sql =
+	    "SELECT min(id), max(id), count(id) FROM read_vortex(" + file_list + ") WHERE file_index = 99";
+	auto empty_aggregate_baseline_result = coordinator.Query(empty_aggregate_sql);
+	if (!empty_aggregate_baseline_result || empty_aggregate_baseline_result->HasError()) {
+		throw std::runtime_error(
+		    "fully pruned aggregate local baseline failed: " +
+		    (empty_aggregate_baseline_result ? empty_aggregate_baseline_result->GetError() : "null result"));
+	}
+	CheckEmptyAggregateRow(*empty_aggregate_baseline_result);
 
 	// A bound file with an empty logical table remains a normal, retryable
 	// elementary task whose execution returns zero rows.
@@ -472,10 +786,29 @@ void TestProtocol() {
 	auto invalid_id = valid_descriptor;
 	invalid_id.extension_tasks[0].task_id = "00";
 	ExpectApplyFailure(planned, worker, invalid_id, "Invalid distributed Vortex task id");
+	auto empty_id = valid_descriptor;
+	empty_id.extension_tasks[0].task_id.clear();
+	ExpectApplyFailure(planned, worker, empty_id, "empty task_id");
+
+	auto empty_payload = valid_descriptor;
+	empty_payload.extension_tasks[0].payload.clear();
+	ExpectApplyFailure(planned, worker, empty_payload, "empty payload");
 
 	auto corrupt_payload = valid_descriptor;
 	corrupt_payload.extension_tasks[0].payload[0] = 'X';
 	ExpectApplyFailure(planned, worker, corrupt_payload, "payload magic");
+
+	auto invalid_size = valid_descriptor;
+	Check(invalid_size.extension_tasks[0].payload.size() >= 9, "Vortex task payload is too short for a file size");
+	for (idx_t byte_index = invalid_size.extension_tasks[0].payload.size() - 8;
+	     byte_index < invalid_size.extension_tasks[0].payload.size(); byte_index++) {
+		invalid_size.extension_tasks[0].payload[byte_index] = static_cast<char>(0xff);
+	}
+	ExpectApplyFailure(planned, worker, invalid_size, "invalid file size");
+
+	auto wrong_codec = valid_descriptor;
+	wrong_codec.task_codec.version++;
+	ExpectApplyFailure(planned, worker, wrong_codec, "task codec mismatch");
 
 	auto unknown_index = valid_descriptor;
 	unknown_index.extension_tasks[0].task_id = "127";

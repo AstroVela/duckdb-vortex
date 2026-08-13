@@ -19,6 +19,8 @@
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
+#include <algorithm>
+
 #ifdef VORTEX_DISTRIBUTED_SCAN
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/limits.hpp"
@@ -45,6 +47,7 @@ unique_ptr<FunctionData> VortexBindData::Copy() const {
     result->aggregate_scan = aggregate_scan;
     result->explicit_task_mode = explicit_task_mode;
     result->tasks_applied = tasks_applied;
+    result->eligible_file_indexes = eligible_file_indexes;
     result->assigned_file_indexes = assigned_file_indexes;
 #endif
     return result;
@@ -52,9 +55,19 @@ unique_ptr<FunctionData> VortexBindData::Copy() const {
 
 bool VortexBindData::Equals(const FunctionData &other_base) const {
     const VortexBindData &other = other_base.Cast<VortexBindData>();
-    // if "types" are different, "ffi_data" would also be different as it
-    // contains types inside, so omit "types" from comparison.
-    return ffi_data.get() == other.ffi_data.get();
+    if (ffi_data || other.ffi_data) {
+        // Runtime bind equality retains the upstream pointer-identity semantics.
+        return ffi_data.get() == other.ffi_data.get();
+    }
+#ifdef VORTEX_DISTRIBUTED_SCAN
+    return types == other.types && names == other.names && portable_bind == other.portable_bind &&
+           distributed_files == other.distributed_files && aggregate_scan == other.aggregate_scan &&
+           explicit_task_mode == other.explicit_task_mode && tasks_applied == other.tasks_applied &&
+           eligible_file_indexes == other.eligible_file_indexes &&
+           assigned_file_indexes == other.assigned_file_indexes;
+#else
+    return types == other.types && names == other.names;
+#endif
 }
 
 #ifdef VORTEX_DISTRIBUTED_SCAN
@@ -98,6 +111,11 @@ void VortexBindData::RefreshPortableBind() const {
         file.source_url.assign(reinterpret_cast<const char *>(view.source_url), view.source_url_len);
         file.path.assign(reinterpret_cast<const char *>(view.path), view.path_len);
         if (view.has_size) {
+            if (view.size == DConstants::INVALID_INDEX) {
+                throw SerializationException(
+                    "Vortex file size at index %llu collides with DuckDB's invalid-size sentinel",
+                    static_cast<unsigned long long>(file_index));
+            }
             file.size = optional_idx(view.size);
         }
         files.push_back(std::move(file));
@@ -301,6 +319,14 @@ duckdb_vx_expr duckdb_vx_aggregate_at(duckdb_vx_agg_input ffi_input, idx_t i, id
 }
 
 bool aggregate_pushdown(ClientContext &, const TableFunctionUngroupedAggregateInput &input) {
+    // TryReplaceAggregate rewrites the LogicalGet's column IDs to aggregate
+    // result positions. DuckDB table filters still refer to the original scan
+    // columns, so retaining them would either attach a filter to the wrong
+    // field or make physical planning fail (in particular for virtual file
+    // columns). Keep the upper aggregate whenever table filters remain.
+    if (!input.get.table_filters.filters.empty()) {
+        return false;
+    }
 #ifdef VORTEX_DISTRIBUTED_SCAN
     // See projection_expression_pushdown: detached binds only contain the
     // serialized scan recipe, not a connection-scoped optimizer reader.
@@ -348,6 +374,7 @@ unique_ptr<GlobalTableFunctionState> init_global(ClientContext &context, TableFu
         .projection_ids_count = input.projection_ids.size(),
         .filters = reinterpret_cast<duckdb_vx_table_filter_set>(input.filters.get()),
         .client_context = reinterpret_cast<duckdb_client_context>(&context),
+        .ignore_optional_filters = false,
     };
 
     duckdb_vx_error error_out = nullptr;
@@ -355,16 +382,30 @@ unique_ptr<GlobalTableFunctionState> init_global(ClientContext &context, TableFu
     bool distributed = false;
 #ifdef VORTEX_DISTRIBUTED_SCAN
     if (!bind_data.ffi_data) {
-        if (!bind_data.explicit_task_mode || !bind_data.tasks_applied) {
+        if (bind_data.explicit_task_mode && !bind_data.tasks_applied) {
             throw InvalidInputException(
                 "Detached distributed Vortex scan requires an explicit task assignment before execution");
         }
         bind_data.RefreshPortableBind();
+        vector<idx_t> native_file_indexes;
+        const vector<idx_t> *runtime_file_indexes = &bind_data.assigned_file_indexes;
+        if (!bind_data.explicit_task_mode) {
+            native_file_indexes.reserve(bind_data.distributed_files.size());
+            for (idx_t file_index = 0; file_index < bind_data.distributed_files.size(); file_index++) {
+                native_file_indexes.push_back(file_index);
+            }
+            runtime_file_indexes = &native_file_indexes;
+        }
+        // Optional filters (for example TopN's dynamic bound) are maintained
+        // by an upstream operator that is absent from Vane's detached scan
+        // plan. They are pruning hints, so ignoring them is correctness-safe;
+        // required table filters still pass through unchanged.
+        ffi_input.ignore_optional_filters = bind_data.explicit_task_mode;
         ffi_global_data = duckdb_table_function_init_global_distributed(
             reinterpret_cast<const uint8_t *>(bind_data.portable_bind.data()),
             bind_data.portable_bind.size(),
-            bind_data.assigned_file_indexes.data(),
-            bind_data.assigned_file_indexes.size(),
+            runtime_file_indexes->data(),
+            runtime_file_indexes->size(),
             &ffi_input,
             &error_out);
         distributed = true;
@@ -378,7 +419,9 @@ unique_ptr<GlobalTableFunctionState> init_global(ClientContext &context, TableFu
     }
 
     auto cdata = unique_ptr<CData>(reinterpret_cast<CData *>(ffi_global_data));
-    return make_uniq<VortexGlobalData>(std::move(cdata), distributed);
+    const auto force_empty_output = distributed && bind_data.explicit_task_mode && bind_data.tasks_applied &&
+                                    bind_data.assigned_file_indexes.empty();
+    return make_uniq<VortexGlobalData>(std::move(cdata), distributed, force_empty_output);
 }
 
 unique_ptr<LocalTableFunctionState>
@@ -401,6 +444,11 @@ init_local(ExecutionContext &, TableFunctionInitInput &input, GlobalTableFunctio
 }
 
 void function(ClientContext &, TableFunctionInput &input, DataChunk &output) {
+    auto &global = input.global_state->Cast<VortexGlobalData>();
+    if (global.force_empty_output) {
+        output.SetCardinality(0);
+        return;
+    }
     void *const ffi_global = get_ffi_global(input.global_state.get());
     void *const ffi_local = get_ffi_local(input.local_state.get());
 
@@ -529,7 +577,9 @@ InsertionOrderPreservingMap<string> to_string(TableFunctionToStringInput &input)
     auto &bind_data = input.bind_data->Cast<VortexBindData>();
     if (!bind_data.ffi_data) {
         result.insert("Function", "Vortex Scan");
-        result.insert("Distributed files", std::to_string(bind_data.assigned_file_indexes.size()));
+        const auto file_count = bind_data.explicit_task_mode ? bind_data.assigned_file_indexes.size()
+                                                             : bind_data.distributed_files.size();
+        result.insert("Distributed files", std::to_string(file_count));
         return result;
     }
 #endif
@@ -667,6 +717,9 @@ static DecodedVortexTask DecodeVortexTask(const string &payload) {
         }
         auto size = decoder.ReadU64();
         if (has_size) {
+            if (size == DConstants::INVALID_INDEX) {
+                throw InvalidInputException("Distributed Vortex task contains an invalid file size");
+            }
             decoded.file.size = optional_idx(size);
         } else if (size != 0) {
             throw InvalidInputException("Distributed Vortex task has a size without a size flag");
@@ -730,6 +783,31 @@ static string CanonicalVortexTaskId(const vector<idx_t> &file_indexes) {
     return result;
 }
 
+static idx_t SaturatingVortexTaskEstimate(idx_t left, idx_t right) {
+    // idx_t(-1) is reserved by optional_idx as its invalid sentinel.
+    const auto maximum = NumericLimits<idx_t>::Maximum() - 1;
+    return right > maximum - left ? maximum : left + right;
+}
+
+static idx_t ProportionalVortexTaskEstimate(idx_t total, idx_t numerator, idx_t denominator) {
+    D_ASSERT(denominator > 0 && numerator <= denominator);
+    if (numerator == 0) {
+        return 0;
+    }
+    if (numerator == denominator) {
+        return total;
+    }
+    const auto scaled = static_cast<long double>(total) * static_cast<long double>(numerator) /
+                        static_cast<long double>(denominator);
+    // On platforms where long double is IEEE double, UINT64_MAX - 1 rounds to
+    // 2^64. Clamp in floating point before the integer conversion so an
+    // extreme estimate cannot invoke an out-of-range conversion.
+    if (scaled >= static_cast<long double>(total)) {
+        return total;
+    }
+    return static_cast<idx_t>(scaled);
+}
+
 static bool SameDistributedFile(const VortexBindData::DistributedFile &left,
                                 const VortexBindData::DistributedFile &right) {
     return left.source_url == right.source_url && left.path == right.path && left.size == right.size;
@@ -765,6 +843,7 @@ static void VortexScanSerialize(Serializer &serializer,
     serializer.WriteProperty(108, "tasks_applied", data.tasks_applied);
     serializer.WriteProperty(109, "assigned_file_indexes", data.assigned_file_indexes);
     serializer.WriteProperty(110, "aggregate_scan", data.aggregate_scan);
+    serializer.WriteProperty(111, "eligible_file_indexes", data.eligible_file_indexes);
 }
 
 static unique_ptr<FunctionData> VortexScanDeserialize(Deserializer &deserializer, TableFunction &) {
@@ -779,6 +858,7 @@ static unique_ptr<FunctionData> VortexScanDeserialize(Deserializer &deserializer
     auto tasks_applied = deserializer.ReadProperty<bool>(108, "tasks_applied");
     auto assigned_file_indexes = deserializer.ReadProperty<vector<idx_t>>(109, "assigned_file_indexes");
     auto aggregate_scan = deserializer.ReadProperty<bool>(110, "aggregate_scan");
+    auto eligible_file_indexes = deserializer.ReadProperty<vector<idx_t>>(111, "eligible_file_indexes");
     if (types.size() != names.size() || portable_bind.empty() || source_urls.size() != paths.size() ||
         source_urls.size() != sizes.size() || source_urls.size() != has_sizes.size()) {
         throw SerializationException("Invalid serialized Vortex bind state");
@@ -794,25 +874,42 @@ static unique_ptr<FunctionData> VortexScanDeserialize(Deserializer &deserializer
         file.source_url = std::move(source_urls[file_index]);
         file.path = std::move(paths[file_index]);
         if (has_sizes[file_index]) {
+            if (sizes[file_index] == DConstants::INVALID_INDEX) {
+                throw SerializationException("Serialized Vortex file has an invalid size");
+            }
             file.size = optional_idx(sizes[file_index]);
         } else if (sizes[file_index] != 0) {
             throw SerializationException("Serialized Vortex file has a size without a size flag");
         }
         files.push_back(std::move(file));
     }
+    unordered_set<idx_t> eligible;
+    for (auto file_index : eligible_file_indexes) {
+        if (file_index >= files.size() || !eligible.insert(file_index).second) {
+            throw SerializationException("Invalid eligible Vortex file index %llu",
+                                         static_cast<unsigned long long>(file_index));
+        }
+    }
     unordered_set<idx_t> assigned;
     for (auto file_index : assigned_file_indexes) {
-        if (file_index >= files.size() || !assigned.insert(file_index).second) {
+        if (file_index >= files.size() || !assigned.insert(file_index).second ||
+            !eligible.count(file_index)) {
             throw SerializationException("Invalid assigned Vortex file index %llu",
                                          static_cast<unsigned long long>(file_index));
         }
     }
-    if (!explicit_task_mode && (tasks_applied || !assigned_file_indexes.empty())) {
+    if (!explicit_task_mode &&
+        (tasks_applied || !eligible_file_indexes.empty() || !assigned_file_indexes.empty())) {
         throw SerializationException("Native Vortex bind contains distributed task state");
     }
     if (!tasks_applied && !assigned_file_indexes.empty()) {
         throw SerializationException(
             "Detached Vortex bind contains assigned files without an applied descriptor");
+    }
+    if (aggregate_scan && tasks_applied && !assigned_file_indexes.empty() &&
+        assigned_file_indexes != eligible_file_indexes) {
+        throw SerializationException(
+            "Distributed aggregate Vortex bind contains an incomplete file assignment");
     }
 
     auto result = make_uniq<VortexBindData>(nullptr, types, names);
@@ -821,19 +918,13 @@ static unique_ptr<FunctionData> VortexScanDeserialize(Deserializer &deserializer
     result->aggregate_scan = aggregate_scan;
     result->explicit_task_mode = explicit_task_mode;
     result->tasks_applied = tasks_applied;
+    result->eligible_file_indexes = std::move(eligible_file_indexes);
     result->assigned_file_indexes = std::move(assigned_file_indexes);
     return result;
 }
 
-static vector<DistributedScanTask> VortexPlanDistributedScan(const TableFunctionDistributedScanInput &input) {
+static vector<idx_t> SelectDistributedVortexFiles(const TableFunctionDistributedScanInput &input) {
     auto &bind_data = input.bind_data.Cast<VortexBindData>();
-    if (bind_data.explicit_task_mode) {
-        throw InvalidInputException("Distributed Vortex tasks cannot be planned from a worker bind");
-    }
-    // Vane may serialize a logical coordinator plan before generating its
-    // physical scan. Such a bind is intentionally detached from the original
-    // connection, but its owned portable state and immutable file identities
-    // are sufficient for deterministic task planning.
     bind_data.RefreshPortableBind();
     vector<idx_t> column_ids;
     column_ids.reserve(input.column_ids.size());
@@ -858,25 +949,43 @@ static vector<DistributedScanTask> VortexPlanDistributedScan(const TableFunction
             selected_file_indexes.push_back(file_index);
         }
     }
+    return selected_file_indexes;
+}
+
+static vector<DistributedScanTask> VortexPlanDistributedScan(const TableFunctionDistributedScanInput &input) {
+    auto &bind_data = input.bind_data.Cast<VortexBindData>();
+    if (bind_data.explicit_task_mode) {
+        throw InvalidInputException("Distributed Vortex tasks cannot be planned from a worker bind");
+    }
+    // Vane may serialize a logical coordinator plan before generating its
+    // physical scan. Such a bind is intentionally detached from the original
+    // connection, but its owned portable state and immutable file identities
+    // are sufficient for deterministic task planning.
+    auto selected_file_indexes = SelectDistributedVortexFiles(input);
     vector<DistributedScanTask> result;
     if (selected_file_indexes.empty()) {
         return result;
     }
     result.reserve(bind_data.aggregate_scan ? 1 : selected_file_indexes.size());
-    uint64_t total_bytes = 0;
+    idx_t total_bytes = 0;
+    bool all_file_sizes_known = true;
     for (auto file_index : selected_file_indexes) {
         const auto &file = bind_data.distributed_files[file_index];
         if (file.size.IsValid()) {
-            total_bytes += file.size.GetIndex();
+            total_bytes = SaturatingVortexTaskEstimate(total_bytes, file.size.GetIndex());
+        } else {
+            all_file_sizes_known = false;
         }
     }
-    const auto estimated_rows =
-        input.estimated_cardinality == DConstants::INVALID_INDEX ? 0 : input.estimated_cardinality;
+    const auto has_estimated_rows = input.estimated_cardinality != DConstants::INVALID_INDEX;
+    const auto estimated_rows = has_estimated_rows ? input.estimated_cardinality : 0;
     if (bind_data.aggregate_scan) {
         DistributedScanTask task;
         task.task_id = CanonicalVortexTaskId(selected_file_indexes);
         task.payload = EncodeVortexTask(selected_file_indexes, bind_data);
-        task.estimated_bytes = optional_idx(total_bytes);
+        if (all_file_sizes_known) {
+            task.estimated_bytes = optional_idx(total_bytes);
+        }
         task.estimated_cardinality = optional_idx(1);
         result.push_back(std::move(task));
         return result;
@@ -890,32 +999,62 @@ static vector<DistributedScanTask> VortexPlanDistributedScan(const TableFunction
         DistributedScanTask task;
         task.task_id = CanonicalVortexTaskId(task_files);
         task.payload = EncodeVortexTask(task_files, bind_data);
-        const auto file_bytes = file.size.IsValid() ? file.size.GetIndex() : 0;
-        task.estimated_bytes = optional_idx(file_bytes);
-        idx_t cumulative_rows;
-        if (total_bytes > 0) {
-            cumulative_bytes += file_bytes;
-            cumulative_rows = static_cast<idx_t>(static_cast<long double>(estimated_rows) * cumulative_bytes /
-                                                 static_cast<long double>(total_bytes));
-        } else {
-            cumulative_rows = static_cast<idx_t>(static_cast<long double>(estimated_rows) *
-                                                 (selected_index + 1) / selected_file_indexes.size());
+        if (file.size.IsValid()) {
+            task.estimated_bytes = file.size;
         }
-        task.estimated_cardinality = optional_idx(cumulative_rows - previous_cumulative_rows);
-        previous_cumulative_rows = cumulative_rows;
+        if (has_estimated_rows) {
+            idx_t cumulative_rows;
+            if (all_file_sizes_known && total_bytes > 0) {
+                cumulative_bytes = SaturatingVortexTaskEstimate(cumulative_bytes, file.size.GetIndex());
+                cumulative_rows =
+                    ProportionalVortexTaskEstimate(estimated_rows, cumulative_bytes, total_bytes);
+            } else {
+                cumulative_rows = ProportionalVortexTaskEstimate(estimated_rows,
+                                                                 selected_index + 1,
+                                                                 selected_file_indexes.size());
+            }
+            task.estimated_cardinality = optional_idx(cumulative_rows - previous_cumulative_rows);
+            previous_cumulative_rows = cumulative_rows;
+        }
         result.push_back(std::move(task));
     }
     return result;
 }
 
-static void VortexPrepareDistributedBind(const TableFunctionDistributedScanInput &,
+static void VortexPrepareDistributedBind(const TableFunctionDistributedScanInput &input,
                                          FunctionData &worker_bind_data) {
     auto &bind_data = worker_bind_data.Cast<VortexBindData>();
     if (bind_data.ffi_data) {
         throw InternalException("Distributed Vortex worker bind unexpectedly retained runtime reader state");
     }
+    if (bind_data.explicit_task_mode || bind_data.tasks_applied || !bind_data.eligible_file_indexes.empty() ||
+        !bind_data.assigned_file_indexes.empty()) {
+        throw SerializationException("Distributed Vortex worker bind contains stale explicit task state");
+    }
+    auto &coordinator_bind = input.bind_data.Cast<VortexBindData>();
+    if (coordinator_bind.explicit_task_mode) {
+        throw InvalidInputException(
+            "Distributed Vortex worker bind cannot be prepared from another worker bind");
+    }
+    auto eligible_file_indexes = SelectDistributedVortexFiles(input);
+    if (bind_data.types != coordinator_bind.types || bind_data.names != coordinator_bind.names ||
+        bind_data.portable_bind != coordinator_bind.portable_bind ||
+        bind_data.aggregate_scan != coordinator_bind.aggregate_scan) {
+        throw SerializationException("Distributed Vortex worker bind changed during physical-plan transport");
+    }
+    if (bind_data.distributed_files.size() != coordinator_bind.distributed_files.size()) {
+        throw SerializationException("Distributed Vortex worker bind changed the bound file count");
+    }
+    for (idx_t file_index = 0; file_index < bind_data.distributed_files.size(); file_index++) {
+        if (!SameDistributedFile(bind_data.distributed_files[file_index],
+                                 coordinator_bind.distributed_files[file_index])) {
+            throw SerializationException("Distributed Vortex worker bind changed file identity %llu",
+                                         static_cast<unsigned long long>(file_index));
+        }
+    }
     bind_data.explicit_task_mode = true;
     bind_data.tasks_applied = false;
+    bind_data.eligible_file_indexes = std::move(eligible_file_indexes);
     bind_data.assigned_file_indexes.clear();
 }
 
@@ -930,11 +1069,16 @@ static void VortexApplyDistributedTasks(FunctionData &worker_bind_data,
     }
     unordered_set<string> task_ids;
     unordered_set<idx_t> file_indexes;
+    unordered_set<idx_t> eligible_file_indexes(bind_data.eligible_file_indexes.begin(),
+                                               bind_data.eligible_file_indexes.end());
     vector<idx_t> assigned;
     assigned.reserve(bind_data.distributed_files.size());
     for (const auto &task : tasks) {
-        if (!IsCanonicalVortexTaskId(task.task_id) || task.payload.empty()) {
+        if (!IsCanonicalVortexTaskId(task.task_id)) {
             throw InvalidInputException("Invalid distributed Vortex task id '%s'", task.task_id);
+        }
+        if (task.payload.empty()) {
+            throw InvalidInputException("Distributed Vortex task '%s' has an empty payload", task.task_id);
         }
         if (!task_ids.insert(task.task_id).second) {
             throw InvalidInputException("Duplicate distributed Vortex task id '%s'", task.task_id);
@@ -950,6 +1094,12 @@ static void VortexApplyDistributedTasks(FunctionData &worker_bind_data,
             if (decoded_file.file_index >= bind_data.distributed_files.size()) {
                 throw InvalidInputException("Distributed Vortex task '%s' references an unknown file index",
                                             task.task_id);
+            }
+            if (!eligible_file_indexes.count(decoded_file.file_index)) {
+                throw InvalidInputException(
+                    "Distributed Vortex task '%s' references file index %llu outside the planned file set",
+                    task.task_id,
+                    static_cast<unsigned long long>(decoded_file.file_index));
             }
             if (!SameDistributedFile(decoded_file.file,
                                      bind_data.distributed_files[decoded_file.file_index])) {
@@ -970,6 +1120,21 @@ static void VortexApplyDistributedTasks(FunctionData &worker_bind_data,
                 "Distributed Vortex task id '%s' does not match its payload file indexes",
                 task.task_id);
         }
+    }
+    // A descriptor is a set of elementary scan tasks. Canonicalize its file
+    // assignment so transport or retry code may reorder those tasks without
+    // changing scan meaning or defeating idempotent re-application.
+    std::sort(assigned.begin(), assigned.end());
+    if (bind_data.aggregate_scan && !tasks.empty() && assigned != bind_data.eligible_file_indexes) {
+        throw InvalidInputException(
+            "Distributed aggregate Vortex task does not contain the complete planned file set");
+    }
+    if (bind_data.tasks_applied) {
+        if (assigned != bind_data.assigned_file_indexes) {
+            throw InvalidInputException(
+                "Distributed Vortex bind already has a different explicit task assignment");
+        }
+        return;
     }
     bind_data.assigned_file_indexes = std::move(assigned);
     bind_data.tasks_applied = true;
@@ -995,6 +1160,12 @@ duckdb_state register_table_function(DatabaseInstance &db, LogicalType parameter
     tf.filter_pushdown = true;
     tf.filter_prune = true;
     tf.sampling_pushdown = false;
+    tf.supports_pushdown_type = [](const FunctionData &, idx_t column_id) {
+        // file_index is constant per partition and is evaluated exactly before
+        // readers are created. Other virtual-column filters stay in a DuckDB
+        // PhysicalFilter so unsupported predicates cannot be silently ignored.
+        return !IsVirtualColumn(column_id) || column_id == COLUMN_IDENTIFIER_FILE_INDEX;
+    };
 
     tf.pushdown_expression = [](auto &, const auto &, Expression &expression) {
         return duckdb_table_function_pushdown_expression(reinterpret_cast<duckdb_vx_expr>(&expression));
@@ -1013,9 +1184,17 @@ duckdb_state register_table_function(DatabaseInstance &db, LogicalType parameter
     tf.serialize = VortexScanSerialize;
     tf.deserialize = VortexScanDeserialize;
     tf.SetDistributedScanCallbacks(VortexDistributedScanCallbacks());
-#endif
 
+    // DuckDB's late-materialization rewrite duplicates the table scan and
+    // joins the copies by their virtual row identifiers. Vane assigns explicit
+    // tasks to every physical scan independently, so the two sides are not a
+    // co-partitioned unit and can otherwise observe disjoint file assignments.
+    // Keep the distributed-capable function as one explicit scan until Vane
+    // has a grouped multi-scan task contract.
+    tf.late_materialization = false;
+#else
     tf.late_materialization = true;
+#endif
     // Columns that uniquely identify a row for deferred re-fetch in a multi
     // file scan: (file index, row number in file).
     tf.get_row_id_columns = [](auto &, auto) -> vector<column_t> {

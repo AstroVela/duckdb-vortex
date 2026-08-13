@@ -38,6 +38,7 @@ pub fn try_from_table_filter(
     value: &TableFilterRef,
     col: &Expression,
     scope_dtype: &DType,
+    ignore_optional_filters: bool,
 ) -> VortexResult<Option<Expression>> {
     Ok(Some(match value.as_class() {
         TableFilterClass::ConstantComparison(const_) => {
@@ -48,7 +49,9 @@ pub fn try_from_table_filter(
         TableFilterClass::ConjunctionAnd(conj_and) => {
             let Some(children) = conj_and
                 .children()
-                .map(|child| try_from_table_filter(child, col, scope_dtype))
+                .map(|child| {
+                    try_from_table_filter(child, col, scope_dtype, ignore_optional_filters)
+                })
                 .try_collect::<_, Option<Vec<_>>, _>()?
             else {
                 return Ok(None);
@@ -60,7 +63,9 @@ pub fn try_from_table_filter(
         TableFilterClass::ConjunctionOr(disjuction_or) => {
             let Some(children) = disjuction_or
                 .children()
-                .map(|child| try_from_table_filter(child, col, scope_dtype))
+                .map(|child| {
+                    try_from_table_filter(child, col, scope_dtype, ignore_optional_filters)
+                })
                 .try_collect::<_, Option<Vec<_>>, _>()?
             else {
                 return Ok(None);
@@ -71,14 +76,32 @@ pub fn try_from_table_filter(
         TableFilterClass::IsNull => is_null(col.clone()),
         TableFilterClass::IsNotNull => is_not_null(col.clone()),
         TableFilterClass::StructExtract(name, child_filter) => {
-            return try_from_table_filter(child_filter, &get_item(name, col.clone()), scope_dtype);
+            return try_from_table_filter(
+                child_filter,
+                &get_item(name, col.clone()),
+                scope_dtype,
+                ignore_optional_filters,
+            );
         }
         TableFilterClass::Optional(child) => {
-            // Optional expressions are optional not yet supported.
-            return try_from_table_filter(child, col, scope_dtype).or_else(|_err| {
-                // Failed to convert the optional expression, but it's optional, so who cares?
-                Ok(None)
-            });
+            if ignore_optional_filters {
+                // OptionalFilter::FilterSelection admits every row. Model that
+                // identity recursively so required siblings in a conjunction
+                // remain active, while a disjunction containing an ignored
+                // optional child correctly becomes unfiltered.
+                return Ok(Some(lit(true)));
+            }
+            // An optional filter is always an admit-all correctness hint. If
+            // its runtime state disappeared during physical-plan serde, or if
+            // the child cannot be represented by Vortex, preserve that TRUE
+            // identity. Returning None here would make an enclosing AND give
+            // up conversion and could silently drop required sibling filters.
+            return Ok(Some(
+                try_from_table_filter(child, col, scope_dtype, false)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| lit(true)),
+            ));
         }
         TableFilterClass::InFilter(values) => {
             // TODO(ngates): I'm pretty sure we actually need this as ScalarValue with the
@@ -93,6 +116,12 @@ pub fn try_from_table_filter(
             list_contains(lit(list_scalar), col.clone())
         }
         TableFilterClass::Dynamic(dynamic) => {
+            let Some(data) = dynamic.data else {
+                // DuckDB intentionally drops connection-scoped dynamic filter
+                // state during physical-plan serialization. With no runtime
+                // value this pruning hint admits every row.
+                return Ok(None);
+            };
             let op = match dynamic.operator {
                 DUCKDB_VX_EXPR_TYPE::DUCKDB_VX_EXPR_TYPE_COMPARE_EQUAL => CompareOperator::Eq,
                 DUCKDB_VX_EXPR_TYPE::DUCKDB_VX_EXPR_TYPE_COMPARE_NOTEQUAL => CompareOperator::NotEq,
@@ -109,8 +138,6 @@ pub fn try_from_table_filter(
                     dynamic.operator
                 ),
             };
-            let data = dynamic.data;
-
             vortex::expr::dynamic(
                 op,
                 move || {
