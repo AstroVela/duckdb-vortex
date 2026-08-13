@@ -54,6 +54,44 @@ The main binaries that will be built are:
 - `unittest` is the test runner of duckdb. Again, the extension is already linked into the binary.
 - `vortex_duckdb.duckdb_extension` is the loadable binary as it would be distributed.
 
+### Building against Vane
+
+The normal `make`, `make test`, and packaging targets continue to use the
+upstream `duckdb/` and `extension-ci-tools/` submodules. Vane is an additional,
+explicit build lane provided by `vane-extension-ci-tools/`:
+
+```sh
+git submodule update --init --recursive
+make vane_validate
+make vane_ci \
+  VCPKG_TOOLCHAIN_PATH="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake"
+```
+
+`vane-extension.toml` pins the exact Vane revision used by this lane. The
+local target uses the checked-out `vane/` submodule and therefore compiles
+against `vane/external/duckdb`; CI checks out the same pinned revision. The
+Vane lane uses the additive `vane_extension_config.cmake`; the existing
+`extension_config.cmake` remains the configuration for ordinary DuckDB. The
+Vane-specific table-function registration and distributed scan callbacks are
+enabled only by that additive config after it verifies Vane's distributed
+table-function header; ordinary DuckDB builds retain the existing C API
+registration path.
+
+The current elementary task granularity for row-producing scans is one
+already-bound Vortex file. If DuckDB pushes a final aggregate completely into
+Vortex, its complete pruned file set is instead kept in one indivisible task;
+splitting it would produce per-worker final aggregates that cannot be combined
+correctly. A task records the canonical source URL, object path, and byte
+length, and a worker opens only the files assigned to that task. Missing files
+and byte-length changes fail closed. The reader API used here does not expose a
+stable fragment, snapshot, or object-version identifier, so a same-path,
+same-size in-place rewrite cannot be detected. Distributed inputs must
+therefore remain immutable or use versioned/content-addressed paths for the
+lifetime of planning and retries, and every worker must be able to access those
+paths with equivalent credentials. Vane builds also disable Vortex late
+materialization because its second scan would otherwise require coupled task
+assignment.
+
 ## Running the extension
 
 To run the extension code, simply start the shell with `./build/release/duckdb`.

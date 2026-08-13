@@ -56,10 +56,6 @@ typedef struct {
 
     duckdb_vx_table_filter_set filters;
     duckdb_client_context client_context;
-    // Detached distributed workers do not own the upstream operator that
-    // maintains optional runtime filters. Ignore those pruning hints while
-    // retaining required table filters.
-    bool ignore_optional_filters;
 } duckdb_vx_tfunc_init_input;
 
 // Result data returned from the cardinality callback.

@@ -2,6 +2,25 @@
 
 Rust bindings for DuckDB. Supports DuckDB precompiled libraries for fast builds and from source builds for debugging.
 
+## Vendored source
+
+This directory is based on `vortex-duckdb` from
+[`vortex-data/vortex@7e06a99bb7772087c9546137ea6f4593235426a6`](https://github.com/vortex-data/vortex/tree/7e06a99bb7772087c9546137ea6f4593235426a6/vortex-duckdb).
+It is vendored because Vane's explicit scan protocol must serialize and restore
+the reader's private Rust bind state without copying that layout into DuckDB or
+Vane core. All distributed registration, bind serialization, task filtering,
+and worker-reader reconstruction are gated by the `vane` Cargo feature. With
+that feature disabled, the upstream C API registration, multi-file/glob scan,
+late-materialization, and filter/projection paths remain in use.
+
+Three compatibility and safety corrections are intentionally shared by both
+build lanes: generated bindings detect whether the selected DuckDB C API
+contains GEOMETRY/VARIANT, statistics use the matching DuckDB statistics type
+and release returned values on every path, and an empty projected-column vector
+is converted to Rust's empty slice without calling `from_raw_parts` on a null
+pointer. None of these shared corrections enables or applies Vane task state in
+an ordinary DuckDB build.
+
 ## Prerequisites
 
 - **Ninja**: `brew install ninja` (macOS) | `apt-get install ninja-build` (Ubuntu)
@@ -43,16 +62,10 @@ VX_DUCKDB_DEBUG=1 VX_DUCKDB_SAN=1 cargo build -p vortex-duckdb
 
 ## Running Tests
 
-```bash
-# By default, link against the precompiled DuckDB release build.
-cargo test -p vortex-duckdb
-
-# Link against the DuckDB debug build from source.
-VX_DUCKDB_DEBUG=1 cargo test -p vortex-duckdb
-
-# Link against the DuckDB debug build from source with ASAN & TSAN.
-ASAN_OPTIONS=detect_container_overflow=0 VX_DUCKDB_DEBUG=1 VX_DUCKDB_SAN=1 cargo test -p vortex-duckdb
-```
+This vendored package intentionally omits the upstream workspace-only
+development dependencies, so it is not a standalone test workspace. Validate
+it through the enclosing `duckdb-vortex` native, Vane protocol, sanitizer, and
+Ray integration targets instead.
 
 ## Testing the extension with DuckDB
 

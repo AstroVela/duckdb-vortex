@@ -34,7 +34,26 @@ use crate::duckdb::TableFilterClass;
 use crate::duckdb::TableFilterRef;
 use crate::duckdb::ValueRef;
 
+#[cfg(feature = "vane")]
 pub fn try_from_table_filter(
+    value: &TableFilterRef,
+    col: &Expression,
+    scope_dtype: &DType,
+    ignore_optional_filters: bool,
+) -> VortexResult<Option<Expression>> {
+    try_from_table_filter_impl(value, col, scope_dtype, ignore_optional_filters)
+}
+
+#[cfg(not(feature = "vane"))]
+pub fn try_from_table_filter(
+    value: &TableFilterRef,
+    col: &Expression,
+    scope_dtype: &DType,
+) -> VortexResult<Option<Expression>> {
+    try_from_table_filter_impl(value, col, scope_dtype, false)
+}
+
+fn try_from_table_filter_impl(
     value: &TableFilterRef,
     col: &Expression,
     scope_dtype: &DType,
@@ -50,7 +69,7 @@ pub fn try_from_table_filter(
             let Some(children) = conj_and
                 .children()
                 .map(|child| {
-                    try_from_table_filter(child, col, scope_dtype, ignore_optional_filters)
+                    try_from_table_filter_impl(child, col, scope_dtype, ignore_optional_filters)
                 })
                 .try_collect::<_, Option<Vec<_>>, _>()?
             else {
@@ -64,7 +83,7 @@ pub fn try_from_table_filter(
             let Some(children) = disjuction_or
                 .children()
                 .map(|child| {
-                    try_from_table_filter(child, col, scope_dtype, ignore_optional_filters)
+                    try_from_table_filter_impl(child, col, scope_dtype, ignore_optional_filters)
                 })
                 .try_collect::<_, Option<Vec<_>>, _>()?
             else {
@@ -76,7 +95,7 @@ pub fn try_from_table_filter(
         TableFilterClass::IsNull => is_null(col.clone()),
         TableFilterClass::IsNotNull => is_not_null(col.clone()),
         TableFilterClass::StructExtract(name, child_filter) => {
-            return try_from_table_filter(
+            return try_from_table_filter_impl(
                 child_filter,
                 &get_item(name, col.clone()),
                 scope_dtype,
@@ -84,6 +103,16 @@ pub fn try_from_table_filter(
             );
         }
         TableFilterClass::Optional(child) => {
+            #[cfg(not(feature = "vane"))]
+            {
+                return try_from_table_filter_impl(child, col, scope_dtype, false).or_else(
+                    |_error| {
+                        // Failed to convert the optional expression, but it is only a pruning hint.
+                        Ok(None)
+                    },
+                );
+            }
+            #[cfg(feature = "vane")]
             if ignore_optional_filters {
                 // OptionalFilter::FilterSelection admits every row. Model that
                 // identity recursively so required siblings in a conjunction
@@ -96,12 +125,15 @@ pub fn try_from_table_filter(
             // the child cannot be represented by Vortex, preserve that TRUE
             // identity. Returning None here would make an enclosing AND give
             // up conversion and could silently drop required sibling filters.
-            return Ok(Some(
-                try_from_table_filter(child, col, scope_dtype, false)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| lit(true)),
-            ));
+            #[cfg(feature = "vane")]
+            {
+                return Ok(Some(
+                    try_from_table_filter_impl(child, col, scope_dtype, false)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| lit(true)),
+                ));
+            }
         }
         TableFilterClass::InFilter(values) => {
             // TODO(ngates): I'm pretty sure we actually need this as ScalarValue with the
@@ -116,12 +148,15 @@ pub fn try_from_table_filter(
             list_contains(lit(list_scalar), col.clone())
         }
         TableFilterClass::Dynamic(dynamic) => {
+            #[cfg(feature = "vane")]
             let Some(data) = dynamic.data else {
                 // DuckDB intentionally drops connection-scoped dynamic filter
                 // state during physical-plan serialization. With no runtime
                 // value this pruning hint admits every row.
                 return Ok(None);
             };
+            #[cfg(not(feature = "vane"))]
+            let data = dynamic.data;
             let op = match dynamic.operator {
                 DUCKDB_VX_EXPR_TYPE::DUCKDB_VX_EXPR_TYPE_COMPARE_EQUAL => CompareOperator::Eq,
                 DUCKDB_VX_EXPR_TYPE::DUCKDB_VX_EXPR_TYPE_COMPARE_NOTEQUAL => CompareOperator::NotEq,

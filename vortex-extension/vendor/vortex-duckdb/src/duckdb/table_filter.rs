@@ -9,7 +9,9 @@ use std::ptr;
 
 use cpp::duckdb_vx_table_filter;
 use num_traits::AsPrimitive;
+#[cfg(feature = "vane")]
 use vortex::error::VortexResult;
+#[cfg(feature = "vane")]
 use vortex::error::vortex_err;
 use vortex::error::vortex_panic;
 
@@ -68,6 +70,7 @@ impl Debug for TableFilterSetRef {
 lifetime_wrapper!(TableFilter, duckdb_vx_table_filter, |_| {});
 
 impl TableFilterRef {
+    #[cfg(feature = "vane")]
     pub fn matches_ubigint(
         &self,
         client_context: cpp::duckdb_client_context,
@@ -194,9 +197,14 @@ impl TableFilterRef {
                 };
                 unsafe { cpp::duckdb_vx_table_filter_get_dynamic(self.as_ptr(), &raw mut out) };
 
+                #[cfg(feature = "vane")]
+                let data =
+                    (!out.data.is_null()).then(|| unsafe { DynamicFilterData::own(out.data) });
+                #[cfg(not(feature = "vane"))]
+                let data = unsafe { DynamicFilterData::own(out.data) };
+
                 TableFilterClass::Dynamic(DynamicFilter {
-                    data: (!out.data.is_null())
-                        .then(|| unsafe { DynamicFilterData::own(out.data) }),
+                    data,
                     operator: out.comparison_type,
                 })
             }
@@ -295,7 +303,10 @@ impl<'a> Values<'a> {
 }
 
 pub struct DynamicFilter {
+    #[cfg(feature = "vane")]
     pub data: Option<DynamicFilterData>,
+    #[cfg(not(feature = "vane"))]
+    pub data: DynamicFilterData,
     pub operator: cpp::DUCKDB_VX_EXPR_TYPE,
 }
 

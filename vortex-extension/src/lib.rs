@@ -20,6 +20,14 @@ pub unsafe extern "C" fn vortex_init_rust(db: *mut c_void) {
     unsafe { vortex_duckdb::initialize_extension_from_raw(db) };
 }
 
+/// Initialize process-wide Vortex runtime support for the Vane-specific C++
+/// loader path. Ordinary DuckDB builds continue to use `vortex_init_rust`.
+#[cfg(feature = "vane")]
+#[unsafe(no_mangle)]
+pub extern "C" fn vortex_init_vane_rust() {
+    vortex_duckdb::initialize_runtime();
+}
+
 /// The DuckDB extension ABI version function.
 /// This function returns the version of the DuckDB library the extension is built against.
 #[unsafe(no_mangle)]

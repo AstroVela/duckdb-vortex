@@ -17,9 +17,13 @@ use crate::copy::copy_to_finalize;
 use crate::copy::copy_to_initialize_global;
 use crate::copy::copy_to_sink;
 use crate::cpp;
+#[cfg(feature = "vane")]
 use crate::distributed::DistributedRuntimeGlobal;
+#[cfg(feature = "vane")]
 use crate::distributed::PortableDistributedBind;
+#[cfg(feature = "vane")]
 use crate::distributed::deserialize_runtime_bind;
+#[cfg(feature = "vane")]
 use crate::distributed::serialize_bind;
 use crate::duckdb::AggregatePushdownInput;
 use crate::duckdb::BindInput;
@@ -30,10 +34,12 @@ use crate::duckdb::DuckdbStringMap;
 use crate::duckdb::Expression;
 use crate::duckdb::LogicalType;
 use crate::duckdb::LogicalTypeRef;
+#[cfg(feature = "vane")]
 use crate::duckdb::TableFilterSet;
 use crate::duckdb::TableInitInput;
 use crate::duckdb::try_or;
 use crate::duckdb::try_or_null;
+#[cfg(feature = "vane")]
 use crate::projection::distributed_file_index_is_selected;
 use crate::table_function::Cardinality;
 use crate::table_function::TableFunctionBind;
@@ -53,6 +59,7 @@ use crate::table_function::table_scan_progress;
 use crate::table_function::to_string;
 
 #[repr(C)]
+#[cfg(feature = "vane")]
 pub struct VortexDistributedFileView {
     pub source_url: *const u8,
     pub source_url_len: usize,
@@ -276,6 +283,7 @@ pub unsafe extern "C-unwind" fn duckdb_table_function_bind_data_clone(
     Data::from(Box::new(copied_data)).as_ptr()
 }
 
+#[cfg(feature = "vane")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn duckdb_table_function_distributed_bind_serialize(
     bind_data: *const c_void,
@@ -289,6 +297,7 @@ pub unsafe extern "C-unwind" fn duckdb_table_function_distributed_bind_serialize
     })
 }
 
+#[cfg(feature = "vane")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn duckdb_table_function_distributed_bind_bytes(
     portable_bind: *const c_void,
@@ -300,6 +309,7 @@ pub unsafe extern "C-unwind" fn duckdb_table_function_distributed_bind_bytes(
     portable_bind.encoded.as_ptr()
 }
 
+#[cfg(feature = "vane")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn duckdb_table_function_distributed_file_count(
     portable_bind: *const c_void,
@@ -309,6 +319,7 @@ pub unsafe extern "C-unwind" fn duckdb_table_function_distributed_file_count(
     portable_bind.files.len()
 }
 
+#[cfg(feature = "vane")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn duckdb_table_function_distributed_is_aggregate(
     portable_bind: *const c_void,
@@ -318,6 +329,7 @@ pub unsafe extern "C-unwind" fn duckdb_table_function_distributed_is_aggregate(
     portable_bind.aggregate_scan
 }
 
+#[cfg(feature = "vane")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn duckdb_table_function_distributed_file_at(
     portable_bind: *const c_void,
@@ -342,6 +354,7 @@ pub unsafe extern "C-unwind" fn duckdb_table_function_distributed_file_at(
     true
 }
 
+#[cfg(feature = "vane")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn duckdb_table_function_distributed_file_is_selected(
     filters: cpp::duckdb_vx_table_filter_set,
@@ -370,12 +383,14 @@ pub unsafe extern "C-unwind" fn duckdb_table_function_distributed_file_is_select
     })
 }
 
+#[cfg(feature = "vane")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn duckdb_table_function_init_global_distributed(
     portable_bind: *const u8,
     portable_bind_size: usize,
     assigned_file_indexes: *const u64,
     assigned_file_count: usize,
+    ignore_optional_filters: bool,
     init_input: *const cpp::duckdb_vx_tfunc_init_input,
     error_out: *mut cpp::duckdb_vx_error,
 ) -> cpp::duckdb_vx_data {
@@ -410,9 +425,11 @@ pub unsafe extern "C-unwind" fn duckdb_table_function_init_global_distributed(
             projection_ids_count: input.projection_ids_count,
             filters: input.filters,
             client_context: input.client_context,
-            ignore_optional_filters: input.ignore_optional_filters,
         };
-        let global_data = init_global(&TableInitInput::new(&runtime_input))?;
+        let global_data = init_global(&TableInitInput::new_distributed(
+            &runtime_input,
+            ignore_optional_filters,
+        ))?;
         Ok(Data::from(Box::new(DistributedRuntimeGlobal {
             bind_data,
             global_data,
@@ -421,6 +438,7 @@ pub unsafe extern "C-unwind" fn duckdb_table_function_init_global_distributed(
     })
 }
 
+#[cfg(feature = "vane")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn duckdb_table_function_distributed_bind_data(
     global_data: *mut c_void,
@@ -430,6 +448,7 @@ pub unsafe extern "C-unwind" fn duckdb_table_function_distributed_bind_data(
     (&raw const global_data.bind_data).cast()
 }
 
+#[cfg(feature = "vane")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn duckdb_table_function_distributed_global_data(
     global_data: *mut c_void,

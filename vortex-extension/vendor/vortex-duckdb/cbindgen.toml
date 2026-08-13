@@ -23,3 +23,6 @@ trailer = """
 
 [fn]
 prefix = "extern"
+
+[defines]
+"feature = vane" = "VORTEX_DISTRIBUTED_SCAN"

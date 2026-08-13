@@ -1,6 +1,6 @@
 # name: test/sql/table.test_slow
 # description: test creating tables and round tripping vortex with them, generate a lot of value to test many batch round trip
-# group: [sql]
+# group: [vortex]
 
 require vortex
 

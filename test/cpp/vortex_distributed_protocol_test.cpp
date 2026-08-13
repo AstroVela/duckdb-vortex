@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Vortex contributors
 // SPDX-License-Identifier: Apache-2.0
 
-#include "vortex_extension.hpp"
-
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/execution/distributed/pipeline_node/pipeline_node.hpp"
@@ -10,12 +8,15 @@
 #include "duckdb/execution/distributed/plan/scan_task.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
+#include "duckdb/main/connection.hpp"
+#include "duckdb/main/database.hpp"
 #include "duckdb/main/materialized_query_result.hpp"
 #include "duckdb/main/prepared_statement_data.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <set>
 #include <stdexcept>
@@ -322,7 +323,6 @@ void TestProtocol() {
 	}
 
 	DuckDB coordinator_database(nullptr);
-	coordinator_database.LoadStaticExtension<VortexExtension>();
 	Connection coordinator(coordinator_database);
 	for (idx_t file_index = 0; file_index < files.size(); file_index++) {
 		auto start = file_index * 10;
@@ -389,7 +389,6 @@ void TestProtocol() {
 	Check(planned.descriptors.size() == files.size(), "workers > tasks changed elementary task count");
 
 	DuckDB worker_database(nullptr);
-	worker_database.LoadStaticExtension<VortexExtension>();
 	Connection worker(worker_database);
 	// DuckDB deliberately deserializes DynamicFilter without its
 	// connection-scoped filter_data. A complete native TopN plan must treat that
@@ -455,9 +454,9 @@ void TestProtocol() {
 	std::sort(glob_distributed_rows.begin(), glob_distributed_rows.end());
 	Check(glob_distributed_rows == baseline_rows, "distributed absolute-path Vortex glob differs from baseline");
 
-	// Both public scan names are registered through the same legacy C API path,
-	// but each must publish its own Vane capability and remain executable after
-	// worker-plan cloning.
+	// Both public scan names are registered as complete overload sets through
+	// Vane's ordinary ExtensionLoader path. Each must publish its own capability
+	// and remain executable after worker-plan cloning.
 	const auto alias_sql = "SELECT id, file_index FROM vortex_scan(" + file_list + ") WHERE id >= 7 AND id < 25";
 	auto alias_baseline_result = coordinator.Query(alias_sql);
 	Check(alias_baseline_result != nullptr && !alias_baseline_result->HasError(), "vortex_scan alias baseline failed");
@@ -551,6 +550,26 @@ void TestProtocol() {
 	std::filesystem::rename(missing_file, files[0]);
 	Check(StringUtil::Contains(missing_file_error, "no longer exists"),
 	      "missing bound Vortex file did not fail with an identity error: " + missing_file_error);
+
+	// The public Vortex listing gives us a stable path and byte length, but no
+	// snapshot or object-version token. At minimum, retries must reject a file
+	// whose length no longer matches the coordinator's immutable bind.
+	auto original_file_size = std::filesystem::file_size(files[0]);
+	{
+		std::ofstream changed_file(files[0], std::ios::binary | std::ios::app);
+		Check(changed_file.good(), "failed to open a bound Vortex file for the size-change test");
+		changed_file.put('\0');
+		Check(changed_file.good(), "failed to extend a bound Vortex file for the size-change test");
+	}
+	string changed_file_error;
+	try {
+		(void)ExecuteAssigned(planned, worker, planned.descriptors.front(), 175);
+	} catch (const std::exception &error) {
+		changed_file_error = error.what();
+	}
+	std::filesystem::resize_file(files[0], original_file_size);
+	Check(StringUtil::Contains(changed_file_error, "size changed"),
+	      "changed bound Vortex file did not fail with an identity error: " + changed_file_error);
 
 	vector<ResultRow> distributed_rows;
 	for (idx_t descriptor_index = 0; descriptor_index < planned.descriptors.size(); descriptor_index++) {

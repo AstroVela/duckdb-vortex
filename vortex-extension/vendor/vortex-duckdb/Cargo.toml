@@ -24,7 +24,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 async-fs = "2.2.0"
-async-trait = "0.1.89"
+async-trait = { version = "0.1.89", optional = true }
 bitvec = "1.0.1"
 custom-labels = "0.4.4"
 futures = { version = "0.3.31", default-features = false }
@@ -34,7 +34,7 @@ num-traits = "0.2.19"
 object_store = { version = "0.13.2", default-features = false, features = ["aws"] }
 parking_lot = { version = "0.12.3", features = ["nightly"] }
 paste = "1.0.15"
-prost = "0.14"
+prost = { version = "0.14", optional = true }
 static_assertions = "1.1"
 tracing = { version = "0.1.41", default-features = false }
 tracing-subscriber = "0.3"
@@ -51,6 +51,7 @@ vortex-utils = { git = "https://github.com/vortex-data/vortex.git", rev = "7e06a
 
 [features]
 opendal = ["vortex/opendal"]
+vane = ["dep:async-trait", "dep:prost"]
 
 [build-dependencies]
 bindgen = "0.72.0"

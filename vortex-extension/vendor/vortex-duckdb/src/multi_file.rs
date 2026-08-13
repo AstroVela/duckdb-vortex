@@ -4,26 +4,37 @@
 use std::sync::Arc;
 use std::sync::LazyLock;
 
+#[cfg(feature = "vane")]
 use async_trait::async_trait;
+#[cfg(feature = "vane")]
 use futures::TryStreamExt;
 use itertools::Itertools;
 use object_store::registry::ObjectStoreRegistry;
 use url::Url;
 use vortex::cloud::Registry;
+#[cfg(feature = "vane")]
 use vortex::dtype::DType;
 use vortex::error::VortexResult;
 use vortex::error::vortex_bail;
 use vortex::error::vortex_err;
+#[cfg(feature = "vane")]
 use vortex::file::VortexFile;
+#[cfg(feature = "vane")]
 use vortex::file::VortexOpenOptions;
+#[cfg(not(feature = "vane"))]
+use vortex::file::multi::MultiFileDataSource;
+#[cfg(feature = "vane")]
 use vortex::file::multi::open_cached;
 use vortex::file::multi::parse_uri_or_path;
 use vortex::io::compat::Compat;
+#[cfg(feature = "vane")]
 use vortex::io::filesystem::FileListing;
 use vortex::io::filesystem::FileSystemRef;
 use vortex::io::object_store::ObjectStoreFileSystem;
 use vortex::io::runtime::BlockingRuntime;
+#[cfg(feature = "vane")]
 use vortex::layout::LayoutReaderRef;
+#[cfg(feature = "vane")]
 use vortex::layout::scan::multi::LayoutReaderFactory;
 use vortex::layout::scan::multi::MultiLayoutDataSource;
 
@@ -38,6 +49,7 @@ static REGISTRY: LazyLock<Registry> = LazyLock::new(Registry::new);
 /// One exact file selected by the coordinator bind. `source_url` identifies
 /// the filesystem mount while `path` is the literal path inside that mount.
 /// Keeping both avoids reconstructing ambiguous URLs for stores such as hf://.
+#[cfg(feature = "vane")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoundFile {
     pub source_url: String,
@@ -45,6 +57,7 @@ pub struct BoundFile {
     pub size: Option<u64>,
 }
 
+#[cfg(feature = "vane")]
 pub struct BoundMultiFileScan {
     pub data_source: MultiLayoutDataSource,
     pub files: Vec<BoundFile>,
@@ -54,9 +67,13 @@ fn resolve_filesystem(glob_url: &Url) -> VortexResult<(FileSystemRef, String)> {
     // Compat makes us use tokio which is very bad for local reads on
     // high-core machines because reads go into blocking pool
     if glob_url.scheme() == "file" {
+        #[cfg(feature = "vane")]
+        let path = glob_url.path().trim_start_matches('/').to_string();
+        #[cfg(not(feature = "vane"))]
+        let path = glob_url.path().to_string();
         return Ok((
             Arc::new(ObjectStoreFileSystem::local(RUNTIME.handle())),
-            glob_url.path().trim_start_matches('/').to_string(),
+            path,
         ));
     }
 
@@ -71,17 +88,21 @@ fn resolve_filesystem(glob_url: &Url) -> VortexResult<(FileSystemRef, String)> {
     // the same bucket or repository share a client even though the filesystem wrapper is rebuilt.
     let (object_store, path) = REGISTRY.resolve(glob_url)?;
 
+    #[cfg(feature = "vane")]
+    let path = path.to_string().trim_start_matches('/').to_string();
+    #[cfg(not(feature = "vane"))]
+    let path = path.to_string();
+
     Ok((
         Arc::new(ObjectStoreFileSystem::new(
             Arc::new(Compat::new(object_store)),
             RUNTIME.handle(),
         )),
-        // Match MultiFileDataSource::with_glob: ObjectStoreFileSystem paths
-        // are relative to the store root, including for absolute file:// URLs.
-        path.to_string().trim_start_matches('/').to_string(),
+        path,
     ))
 }
 
+#[cfg(feature = "vane")]
 async fn verify_file(file: &BoundFile, fs: &FileSystemRef) -> VortexResult<FileListing> {
     let listing = fs
         .head(&file.path)
@@ -100,6 +121,7 @@ async fn verify_file(file: &BoundFile, fs: &FileSystemRef) -> VortexResult<FileL
     Ok(listing)
 }
 
+#[cfg(feature = "vane")]
 async fn open_bound_file(file: &BoundFile) -> VortexResult<VortexFile> {
     let source_url = Url::parse(&file.source_url).map_err(|error| {
         vortex_err!(
@@ -120,10 +142,12 @@ async fn open_bound_file(file: &BoundFile) -> VortexResult<VortexFile> {
     .await
 }
 
+#[cfg(feature = "vane")]
 struct BoundFileReaderFactory {
     file: BoundFile,
 }
 
+#[cfg(feature = "vane")]
 #[async_trait]
 impl LayoutReaderFactory for BoundFileReaderFactory {
     async fn open(&self) -> VortexResult<Option<LayoutReaderRef>> {
@@ -134,6 +158,7 @@ impl LayoutReaderFactory for BoundFileReaderFactory {
 /// Build a reader over an already selected file set. No glob is evaluated
 /// here, so an empty assignment stays empty and a worker cannot discover
 /// files that were not part of the coordinator bind.
+#[cfg(feature = "vane")]
 pub fn build_bound_file_scan(
     files: &[BoundFile],
     empty_dtype: Option<DType>,
@@ -163,6 +188,7 @@ pub fn build_bound_file_scan(
 }
 
 /// Shared bind logic for both single-glob and multi-glob variants.
+#[cfg(feature = "vane")]
 pub fn bind_multi_file_scan(input: &BindInputRef) -> VortexResult<BoundMultiFileScan> {
     let glob_url_parameter = input
         .get_parameter(0)
@@ -214,4 +240,43 @@ pub fn bind_multi_file_scan(input: &BindInputRef) -> VortexResult<BoundMultiFile
     }
     let data_source = build_bound_file_scan(&files, None)?;
     Ok(BoundMultiFileScan { data_source, files })
+}
+
+/// Original Vortex multi-file binding path for ordinary DuckDB builds.
+#[cfg(not(feature = "vane"))]
+pub fn bind_multi_file_scan(input: &BindInputRef) -> VortexResult<MultiLayoutDataSource> {
+    let glob_url_parameter = input
+        .get_parameter(0)
+        .ok_or_else(|| vortex_err!("Missing file glob parameter"))?;
+
+    let glob_strings: Vec<String> = match glob_url_parameter.extract() {
+        ExtractedValue::Varchar(glob) => vec![glob.to_string()],
+        ExtractedValue::List(globs) => globs
+            .into_iter()
+            .map(|glob| {
+                let ExtractedValue::Varchar(string) = glob.extract() else {
+                    vortex_bail!("list element must be Varchar type")
+                };
+                Ok(string.to_string())
+            })
+            .try_collect()?,
+        _ => vortex_bail!("Invalid argument to read_vortex table function"),
+    };
+
+    let mut glob_urls: Vec<Url> = Vec::with_capacity(glob_strings.len());
+    for glob_str in glob_strings {
+        glob_urls.push(parse_uri_or_path(&glob_str)?);
+    }
+    let resolved = glob_urls
+        .iter()
+        .map(resolve_filesystem)
+        .collect::<VortexResult<Vec<_>>>()?;
+
+    RUNTIME.block_on(async {
+        let mut builder = MultiFileDataSource::new(SESSION.clone());
+        for (fs, glob) in resolved {
+            builder = builder.with_glob(&glob, Some(fs));
+        }
+        builder.build().await
+    })
 }

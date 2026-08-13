@@ -11,6 +11,10 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/parser/parsed_data/create_copy_function_info.hpp"
 
+#ifdef VORTEX_DISTRIBUTED_SCAN
+#include "duckdb/main/extension/extension_loader.hpp"
+#endif
+
 using namespace duckdb;
 
 struct CopyBindData final : TableFunctionData {
@@ -95,11 +99,7 @@ void copy_to_finalize(ClientContext &, FunctionData &, GlobalFunctionData &gstat
     }
 }
 
-extern "C" duckdb_state duckdb_vx_register_copy_function(duckdb_database ffi_db) {
-    D_ASSERT(ffi_db);
-    const DatabaseWrapper &wrapper = *reinterpret_cast<DatabaseWrapper *>(ffi_db);
-    DatabaseInstance &db = *wrapper.database->instance;
-
+static CopyFunction CreateVortexCopyFunction() {
     CopyFunction fn("vortex");
     fn.copy_to_bind = copy_to_bind;
     fn.copy_to_initialize_global = copy_to_initialize_global;
@@ -115,6 +115,21 @@ extern "C" duckdb_state duckdb_vx_register_copy_function(duckdb_database ffi_db)
         return CopyFunctionExecutionMode::REGULAR_COPY_TO_FILE;
     };
     // TODO(joe): handle parameters as in table_function
+
+    return fn;
+}
+
+#ifdef VORTEX_DISTRIBUTED_SCAN
+void RegisterVortexCopyFunction(ExtensionLoader &loader) {
+    loader.RegisterFunction(CreateVortexCopyFunction());
+}
+#endif
+
+extern "C" duckdb_state duckdb_vx_register_copy_function(duckdb_database ffi_db) {
+    D_ASSERT(ffi_db);
+    const DatabaseWrapper &wrapper = *reinterpret_cast<DatabaseWrapper *>(ffi_db);
+    DatabaseInstance &db = *wrapper.database->instance;
+    auto fn = CreateVortexCopyFunction();
 
     try {
         Catalog &system_catalog = Catalog::GetSystemCatalog(db);

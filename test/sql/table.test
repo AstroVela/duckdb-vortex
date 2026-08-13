@@ -1,6 +1,6 @@
 # name: test/sql/table.test
 # description: test creating tables and round tripping vortex with them
-# group: [sql]
+# group: [vortex]
 
 require vortex
 

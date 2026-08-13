@@ -3,25 +3,46 @@
 #include "vortex_extension.hpp"
 #include "vortex_rust.hpp"
 
+#ifdef VORTEX_DISTRIBUTED_SCAN
+#include "duckdb/main/extension/extension_loader.hpp"
+#endif
+
 using namespace duckdb;
+
+#ifdef VORTEX_DISTRIBUTED_SCAN
+static void LoadVane(ExtensionLoader &loader) {
+	vortex_init_vane_rust();
+	vortex_vane_init(loader);
+}
+#endif
 
 extern "C" {
 DUCKDB_EXTENSION_API void vortex_init(duckdb::DatabaseInstance &db) {
 	vortex_init_rust(reinterpret_cast<duckdb_database>(&db));
 }
 
+#ifdef VORTEX_DISTRIBUTED_SCAN
+#ifdef DUCKDB_BUILD_LOADABLE_EXTENSION
+DUCKDB_CPP_EXTENSION_ENTRY(vortex, loader) {
+	LoadVane(loader);
+}
+#endif
+#else
 DUCKDB_EXTENSION_API void vortex_duckdb_cpp_init(duckdb::DatabaseInstance &db) {
 	vortex_init_rust(reinterpret_cast<duckdb_database>(&db));
 }
+#endif
 
 DUCKDB_EXTENSION_API const char *vortex_version() {
 	return duckdb::DuckDB::LibraryVersion();
 }
 }
 
+#ifndef VORTEX_DISTRIBUTED_SCAN
 static void LoadInternal(DatabaseInstance &db_instance) {
 	vortex_init_rust(reinterpret_cast<duckdb_database>(&db_instance));
 }
+#endif
 
 /// Called when the extension is loaded by DuckDB.
 /// It is responsible for registering functions and initializing state.
@@ -29,10 +50,10 @@ static void LoadInternal(DatabaseInstance &db_instance) {
 /// Specifically, the `read_vortex` table function enables reading data from
 /// Vortex files in SQL queries.
 void VortexExtension::Load(duckdb::ExtensionLoader &loader) {
+#ifdef VORTEX_DISTRIBUTED_SCAN
+	LoadVane(loader);
+#else
 	LoadInternal(loader.GetDatabaseInstance());
-#if __has_include("duckdb/function/distributed_table_function.hpp")
-	loader.RegisterExistingTableFunctionDistributedScan("read_vortex");
-	loader.RegisterExistingTableFunctionDistributedScan("vortex_scan");
 #endif
 }
 

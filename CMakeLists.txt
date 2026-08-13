@@ -18,6 +18,8 @@ if(NOT DEFINED DUCKDB_VERSION OR "${DUCKDB_VERSION}" STREQUAL "")
 endif()
 
 option(USE_SHARED_VORTEX OFF)
+option(VORTEX_ENABLE_VANE
+       "Enable Vane-only registration and explicit distributed scans" OFF)
 set(VORTEX_RUST_TARGET_NAME "vortex_duckdb")
 if (USE_SHARED_VORTEX)
     set(VORTEX_LIB_TYPE "cdylib")
@@ -70,11 +72,23 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     set(VORTEX_CARGO_PROFILE PROFILE release-lto)
 endif()
 
+if(VORTEX_ENABLE_VANE)
+    if(NOT EXISTS
+       "${DUCKDB_MODULE_BASE_DIR}/src/include/duckdb/function/distributed_table_function.hpp"
+    )
+        message(FATAL_ERROR
+                "VORTEX_ENABLE_VANE requires Vane distributed scan support"
+        )
+    endif()
+    set(VORTEX_CARGO_FEATURES FEATURES vane)
+endif()
+
 corrosion_import_crate(
     MANIFEST_PATH vortex-extension/Cargo.toml
     CRATES vortex-extension
     CRATE_TYPES ${VORTEX_LIB_TYPE}
     FLAGS --crate-type=${VORTEX_LIB_TYPE}
+    ${VORTEX_CARGO_FEATURES}
     ${VORTEX_CARGO_PROFILE}
 )
 
@@ -94,6 +108,13 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
 build_static_extension(${TARGET_NAME} src/vortex_extension.cpp)
 build_loadable_extension(${TARGET_NAME} "" src/vortex_extension.cpp)
+
+if(VORTEX_ENABLE_VANE)
+    target_compile_definitions(${EXTENSION_NAME}
+                               PRIVATE VORTEX_DISTRIBUTED_SCAN=1)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME}
+                               PRIVATE VORTEX_DISTRIBUTED_SCAN=1)
+endif()
 
 set(VORTEX_WARNING_FLAGS -Wall -Wextra -Wpedantic -Wno-unused-parameter)
 
@@ -121,16 +142,14 @@ install(
 option(BUILD_VORTEX_DISTRIBUTED_TESTS
        "Build the Vane explicit distributed scan protocol test" OFF)
 if(BUILD_VORTEX_DISTRIBUTED_TESTS)
-    if(NOT BUILD_DISTRIBUTED)
+    if(NOT VORTEX_ENABLE_VANE)
         message(FATAL_ERROR
-                "BUILD_VORTEX_DISTRIBUTED_TESTS requires BUILD_DISTRIBUTED")
+                "BUILD_VORTEX_DISTRIBUTED_TESTS requires VORTEX_ENABLE_VANE"
+        )
     endif()
     add_executable(vortex_distributed_protocol_test EXCLUDE_FROM_ALL
                    test/cpp/vortex_distributed_protocol_test.cpp)
     target_compile_features(vortex_distributed_protocol_test PRIVATE cxx_std_20)
-    target_include_directories(vortex_distributed_protocol_test
-                               PRIVATE src/include)
-    target_link_libraries(vortex_distributed_protocol_test
-                          ${EXTENSION_NAME} duckdb_static)
+    target_link_libraries(vortex_distributed_protocol_test duckdb_static)
     link_extension_libraries(vortex_distributed_protocol_test "")
 endif()

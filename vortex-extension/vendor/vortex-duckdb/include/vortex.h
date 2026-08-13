@@ -13,6 +13,7 @@
 
 #define COUNT_STAR_PROJ_IDX UINT64_MAX
 
+#if defined(VORTEX_DISTRIBUTED_SCAN)
 typedef struct {
   const uint8_t *source_url;
   size_t source_url_len;
@@ -21,6 +22,7 @@ typedef struct {
   uint64_t size;
   bool has_size;
 } VortexDistributedFileView;
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -83,41 +85,60 @@ duckdb_vx_data duckdb_table_function_bind(duckdb_vx_tfunc_bind_input bind_input,
 
 extern duckdb_vx_data duckdb_table_function_bind_data_clone(const void *bind_data);
 
+#if defined(VORTEX_DISTRIBUTED_SCAN)
 extern
 duckdb_vx_data duckdb_table_function_distributed_bind_serialize(const void *bind_data,
                                                                 duckdb_vx_error *error_out);
+#endif
 
+#if defined(VORTEX_DISTRIBUTED_SCAN)
 extern
 const uint8_t *duckdb_table_function_distributed_bind_bytes(const void *portable_bind,
                                                             size_t *size_out);
+#endif
 
+#if defined(VORTEX_DISTRIBUTED_SCAN)
 extern size_t duckdb_table_function_distributed_file_count(const void *portable_bind);
+#endif
 
+#if defined(VORTEX_DISTRIBUTED_SCAN)
 extern bool duckdb_table_function_distributed_is_aggregate(const void *portable_bind);
+#endif
 
+#if defined(VORTEX_DISTRIBUTED_SCAN)
 extern
 bool duckdb_table_function_distributed_file_at(const void *portable_bind,
                                                size_t index,
                                                VortexDistributedFileView *file_out);
+#endif
 
+#if defined(VORTEX_DISTRIBUTED_SCAN)
 extern
 bool duckdb_table_function_distributed_file_is_selected(duckdb_vx_table_filter_set filters,
                                                         const uint64_t *column_ids,
                                                         size_t column_ids_count,
                                                         uint64_t file_index,
                                                         duckdb_vx_error *error_out);
+#endif
 
+#if defined(VORTEX_DISTRIBUTED_SCAN)
 extern
 duckdb_vx_data duckdb_table_function_init_global_distributed(const uint8_t *portable_bind,
                                                              size_t portable_bind_size,
                                                              const uint64_t *assigned_file_indexes,
                                                              size_t assigned_file_count,
+                                                             bool ignore_optional_filters,
                                                              const duckdb_vx_tfunc_init_input *init_input,
                                                              duckdb_vx_error *error_out);
+#endif
 
+#if defined(VORTEX_DISTRIBUTED_SCAN)
 extern const void *duckdb_table_function_distributed_bind_data(void *global_data);
+#endif
 
+#if defined(VORTEX_DISTRIBUTED_SCAN)
 extern void *duckdb_table_function_distributed_global_data(void *global_data);
+#endif
 
 extern
 duckdb_vx_data duckdb_copy_function_copy_to_bind(const char *const *column_names,

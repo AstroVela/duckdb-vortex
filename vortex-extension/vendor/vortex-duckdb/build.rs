@@ -471,6 +471,13 @@ fn try_build_duckdb(
     fs::write(&library_marker, format!("{version}\n{build_type}\n")).unwrap();
 }
 
+fn distributed_scan_enabled(duckdb_include_dir: &Path) -> bool {
+    env::var_os("CARGO_FEATURE_VANE").is_some()
+        && duckdb_include_dir
+            .join("duckdb/function/distributed_table_function.hpp")
+            .is_file()
+}
+
 /// Generate rust functions with bindgen from C sources.
 fn bindgen_c2rust(crate_dir: &Path, duckdb_include_dir: &Path) {
     let mut builder = bindgen::Builder::default()
@@ -503,6 +510,10 @@ fn bindgen_c2rust(crate_dir: &Path, duckdb_include_dir: &Path) {
         .clang_arg(format!("-I{}", crate_dir.join("cpp/include").display()))
         .generate_comments(true)
         .parse_callbacks(Box::new(BindgenCargoCallbacks));
+
+    if distributed_scan_enabled(duckdb_include_dir) {
+        builder = builder.clang_arg("-DVORTEX_DISTRIBUTED_SCAN=1");
+    }
 
     // Some minimal build images provide libclang without Clang's resource
     // headers. In that setup bindgen cannot even parse DuckDB's public C
@@ -577,10 +588,7 @@ fn compile_cpp(duckdb_include_dir: &Path) {
         .include("include")
         .include("cpp/include")
         .files(SOURCE_FILES);
-    if duckdb_include_dir
-        .join("duckdb/function/distributed_table_function.hpp")
-        .is_file()
-    {
+    if distributed_scan_enabled(duckdb_include_dir) {
         build.define("VORTEX_DISTRIBUTED_SCAN", "1");
     }
     build.compile("vortex-duckdb-extras");

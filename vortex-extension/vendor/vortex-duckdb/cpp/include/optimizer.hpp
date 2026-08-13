@@ -123,6 +123,13 @@ LogicalOperatorPtr TryPushdown(ClientContext &context, LogicalOperatorPtr plan) 
             if (projection_expression_pushdown(context, input)) {
                 // LOGICAL_GET doesn't initialize .types of LogicalOperator
                 analysis.get.returned_types[storage_index] = expr->return_type;
+#ifdef VORTEX_DISTRIBUTED_SCAN
+                // ClientContext::ExtractPlan validates column bindings before
+                // its final ResolveOperatorTypes call. Keep the derived scan
+                // output types in sync so Vane can extract a plan immediately
+                // after a projection changes a storage column's return type.
+                analysis.get.ResolveOperatorTypes();
+#endif
                 any_pushed = true;
             } else { // failed to push down expression, can't replace it
                 expr = nullptr;

@@ -25,10 +25,19 @@
 #include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 
+#ifdef VORTEX_DISTRIBUTED_SCAN
+#include "duckdb/main/extension/extension_loader.hpp"
+#endif
+
 #include <cstring>
 #include <string>
 
 using namespace duckdb;
+
+#ifdef VORTEX_DISTRIBUTED_SCAN
+void RegisterVortexCopyFunction(ExtensionLoader &loader);
+void RegisterVortexTableFunctions(ExtensionLoader &loader);
+#endif
 
 extern "C" char *duckdb_vx_value_to_string(duckdb_value value) {
     if (!value) {
@@ -179,6 +188,10 @@ static unique_ptr<TableRef> VortexScanReplacement(ClientContext &context,
     return table_function;
 }
 
+static void RegisterVortexScanReplacement(DatabaseInstance &db) {
+    DBConfig::GetConfig(db).replacement_scans.emplace_back(VortexScanReplacement);
+}
+
 extern "C" duckdb_state duckdb_vx_register_scan_replacement(duckdb_database duckdb_database) {
     if (!duckdb_database) {
         return DuckDBError;
@@ -189,8 +202,7 @@ extern "C" duckdb_state duckdb_vx_register_scan_replacement(duckdb_database duck
         return DuckDBError;
     }
 
-    auto &config = DBConfig::GetConfig(*wrapper->database->instance);
-    config.replacement_scans.emplace_back(VortexScanReplacement);
+    RegisterVortexScanReplacement(*wrapper->database->instance);
 
     return DuckDBSuccess;
 }
@@ -286,12 +298,16 @@ struct VortexOptimizerExtension final : OptimizerExtension {
     }
 };
 
+static void RegisterVortexOptimizerExtension(DatabaseInstance &db) {
+    DBConfig::GetConfig(db).GetCallbackManager().Register(VortexOptimizerExtension());
+}
+
 extern "C" duckdb_state duckdb_vx_optimizer_extension_register(duckdb_database ffi_db) {
     D_ASSERT(ffi_db);
     const DatabaseWrapper &wrapper = *reinterpret_cast<DatabaseWrapper *>(ffi_db);
     DatabaseInstance &db = *wrapper.database->instance;
     try {
-        DBConfig::GetConfig(db).GetCallbackManager().Register(VortexOptimizerExtension());
+        RegisterVortexOptimizerExtension(db);
     } catch (const std::exception &e) {
         ErrorData data(e);
         DUCKDB_LOG_ERROR(db, "Failed to create Vortex optimizer extension:\t" + data.Message());
@@ -299,3 +315,13 @@ extern "C" duckdb_state duckdb_vx_optimizer_extension_register(duckdb_database f
     }
     return DuckDBSuccess;
 }
+
+#ifdef VORTEX_DISTRIBUTED_SCAN
+void vortex_vane_init(ExtensionLoader &loader) {
+    auto &db = loader.GetDatabaseInstance();
+    RegisterVortexScanReplacement(db);
+    RegisterVortexTableFunctions(loader);
+    RegisterVortexOptimizerExtension(db);
+    RegisterVortexCopyFunction(loader);
+}
+#endif

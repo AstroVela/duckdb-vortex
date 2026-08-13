@@ -2,14 +2,20 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 #include "table_filter.h"
+#ifdef VORTEX_DISTRIBUTED_SCAN
 #include "error.hpp"
+#endif
 #include <mutex>
 
+#ifdef VORTEX_DISTRIBUTED_SCAN
 #include "duckdb/common/value_operations/value_operations.hpp"
 #include "duckdb/main/client_context.hpp"
+#endif
 #include "duckdb/planner/table_filter.hpp"
 #include "duckdb/planner/filter/conjunction_filter.hpp"
+#ifdef VORTEX_DISTRIBUTED_SCAN
 #include "duckdb/planner/filter/constant_filter.hpp"
+#endif
 #include "duckdb/planner/filter/dynamic_filter.hpp"
 #include "duckdb/planner/filter/optional_filter.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
@@ -94,6 +100,7 @@ extern "C" void duckdb_vx_table_filter_get_dynamic(duckdb_vx_table_filter ffi_fi
     if (!ffi_filter || !out) {
         return;
     }
+#ifdef VORTEX_DISTRIBUTED_SCAN
     out->data = nullptr;
     out->comparison_type = DUCKDB_VX_EXPR_TYPE_INVALID;
     auto &filter = reinterpret_cast<TableFilter *>(ffi_filter)->Cast<DynamicFilter>();
@@ -112,6 +119,13 @@ extern "C" void duckdb_vx_table_filter_get_dynamic(duckdb_vx_table_filter ffi_fi
     if (filter.filter_data->filter) {
         out->comparison_type = static_cast<duckdb_vx_expr_type>(filter.filter_data->filter->comparison_type);
     }
+#else
+    auto &filter = reinterpret_cast<TableFilter *>(ffi_filter)->Cast<DynamicFilter>();
+    std::lock_guard<std::mutex> lock(filter.filter_data->lock);
+    auto data_wrapper = make_uniq<DynamicFilterDataWrapper>(filter.filter_data);
+    out->data = reinterpret_cast<duckdb_vx_dynamic_filter_data>(data_wrapper.release());
+    out->comparison_type = static_cast<duckdb_vx_expr_type>(filter.filter_data->filter->comparison_type);
+#endif
 }
 
 extern "C" void duckdb_vx_dynamic_filter_data_free(duckdb_vx_dynamic_filter_data *ffi_data) {
@@ -192,6 +206,7 @@ extern "C" duckdb_value duckdb_vx_values_vec_get(duckdb_vx_values_vec ffi_vec, s
     return reinterpret_cast<duckdb_value>(&(*vec)[idx]);
 }
 
+#ifdef VORTEX_DISTRIBUTED_SCAN
 namespace {
 
 duckdb_vx_table_filter_match
@@ -291,3 +306,4 @@ duckdb_vx_table_filter_matches_ubigint(duckdb_vx_table_filter ffi_filter,
         return DUCKDB_VX_TABLE_FILTER_MATCH_UNKNOWN;
     }
 }
+#endif

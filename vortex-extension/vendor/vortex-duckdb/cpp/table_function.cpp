@@ -19,15 +19,16 @@
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
+#ifdef VORTEX_DISTRIBUTED_SCAN
 #include <algorithm>
 
-#ifdef VORTEX_DISTRIBUTED_SCAN
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/function/distributed_table_function.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #endif
 
 using namespace std::string_literals;
@@ -35,13 +36,13 @@ constexpr column_t COLUMN_IDENTIFIER_FILE_INDEX = MultiFileReader::COLUMN_IDENTI
 constexpr column_t COLUMN_IDENTIFIER_FILE_ROW_NUMBER = MultiFileReader::COLUMN_IDENTIFIER_FILE_ROW_NUMBER;
 
 unique_ptr<FunctionData> VortexBindData::Copy() const {
+#ifdef VORTEX_DISTRIBUTED_SCAN
     unique_ptr<CData> ffi_data_copy;
     if (ffi_data) {
         const auto copied_ffi_data = duckdb_table_function_bind_data_clone(ffi_data->DataPtr());
         ffi_data_copy = unique_ptr<CData>(reinterpret_cast<CData *>(copied_ffi_data));
     }
     auto result = make_uniq<VortexBindData>(std::move(ffi_data_copy), types, names);
-#ifdef VORTEX_DISTRIBUTED_SCAN
     result->portable_bind = portable_bind;
     result->distributed_files = distributed_files;
     result->aggregate_scan = aggregate_scan;
@@ -49,24 +50,30 @@ unique_ptr<FunctionData> VortexBindData::Copy() const {
     result->tasks_applied = tasks_applied;
     result->eligible_file_indexes = eligible_file_indexes;
     result->assigned_file_indexes = assigned_file_indexes;
-#endif
     return result;
+#else
+    const auto copied_ffi_data = duckdb_table_function_bind_data_clone(ffi_data->DataPtr());
+    auto ffi_data_p = unique_ptr<CData>(reinterpret_cast<CData *>(copied_ffi_data));
+    return make_uniq<VortexBindData>(std::move(ffi_data_p), types);
+#endif
 }
 
 bool VortexBindData::Equals(const FunctionData &other_base) const {
     const VortexBindData &other = other_base.Cast<VortexBindData>();
+#ifdef VORTEX_DISTRIBUTED_SCAN
     if (ffi_data || other.ffi_data) {
         // Runtime bind equality retains the upstream pointer-identity semantics.
         return ffi_data.get() == other.ffi_data.get();
     }
-#ifdef VORTEX_DISTRIBUTED_SCAN
     return types == other.types && names == other.names && portable_bind == other.portable_bind &&
            distributed_files == other.distributed_files && aggregate_scan == other.aggregate_scan &&
            explicit_task_mode == other.explicit_task_mode && tasks_applied == other.tasks_applied &&
            eligible_file_indexes == other.eligible_file_indexes &&
            assigned_file_indexes == other.assigned_file_indexes;
 #else
-    return types == other.types && names == other.names;
+    // if "types" are different, "ffi_data" would also be different as it
+    // contains types inside, so omit "types" from comparison.
+    return ffi_data.get() == other.ffi_data.get();
 #endif
 }
 
@@ -131,11 +138,15 @@ static duckdb_vx_expr get_ffi_expr(const Expression &expr) {
 }
 
 static void *get_ffi_bind(const FunctionData *bind_data) {
+#ifdef VORTEX_DISTRIBUTED_SCAN
     auto &bind = bind_data->Cast<VortexBindData>();
     if (!bind.ffi_data) {
         throw InternalException("Vortex runtime bind state is not initialized");
     }
     return bind.ffi_data->DataPtr();
+#else
+    return bind_data->Cast<VortexBindData>().ffi_data->DataPtr();
+#endif
 }
 
 static void *get_ffi_global(GlobalTableFunctionState *state) {
@@ -319,6 +330,7 @@ duckdb_vx_expr duckdb_vx_aggregate_at(duckdb_vx_agg_input ffi_input, idx_t i, id
 }
 
 bool aggregate_pushdown(ClientContext &, const TableFunctionUngroupedAggregateInput &input) {
+#ifdef VORTEX_DISTRIBUTED_SCAN
     // TryReplaceAggregate rewrites the LogicalGet's column IDs to aggregate
     // result positions. DuckDB table filters still refer to the original scan
     // columns, so retaining them would either attach a filter to the wrong
@@ -327,7 +339,6 @@ bool aggregate_pushdown(ClientContext &, const TableFunctionUngroupedAggregateIn
     if (!input.get.table_filters.filters.empty()) {
         return false;
     }
-#ifdef VORTEX_DISTRIBUTED_SCAN
     // See projection_expression_pushdown: detached binds only contain the
     // serialized scan recipe, not a connection-scoped optimizer reader.
     if (!input.get.bind_data->Cast<VortexBindData>().ffi_data) {
@@ -360,7 +371,11 @@ unique_ptr<FunctionData> duckdb_vx_table_function_bind(ClientContext &,
     }
 
     auto cdata = unique_ptr<CData>(reinterpret_cast<CData *>(ffi_bind_data));
+#ifdef VORTEX_DISTRIBUTED_SCAN
     return make_uniq<VortexBindData>(std::move(cdata), return_types, names);
+#else
+    return make_uniq<VortexBindData>(std::move(cdata), return_types);
+#endif
 }
 
 unique_ptr<GlobalTableFunctionState> init_global(ClientContext &context, TableFunctionInitInput &input) {
@@ -374,13 +389,12 @@ unique_ptr<GlobalTableFunctionState> init_global(ClientContext &context, TableFu
         .projection_ids_count = input.projection_ids.size(),
         .filters = reinterpret_cast<duckdb_vx_table_filter_set>(input.filters.get()),
         .client_context = reinterpret_cast<duckdb_client_context>(&context),
-        .ignore_optional_filters = false,
     };
 
     duckdb_vx_error error_out = nullptr;
     duckdb_vx_data ffi_global_data;
-    bool distributed = false;
 #ifdef VORTEX_DISTRIBUTED_SCAN
+    bool distributed = false;
     if (!bind_data.ffi_data) {
         if (bind_data.explicit_task_mode && !bind_data.tasks_applied) {
             throw InvalidInputException(
@@ -400,12 +414,12 @@ unique_ptr<GlobalTableFunctionState> init_global(ClientContext &context, TableFu
         // by an upstream operator that is absent from Vane's detached scan
         // plan. They are pruning hints, so ignoring them is correctness-safe;
         // required table filters still pass through unchanged.
-        ffi_input.ignore_optional_filters = bind_data.explicit_task_mode;
         ffi_global_data = duckdb_table_function_init_global_distributed(
             reinterpret_cast<const uint8_t *>(bind_data.portable_bind.data()),
             bind_data.portable_bind.size(),
             runtime_file_indexes->data(),
             runtime_file_indexes->size(),
+            bind_data.explicit_task_mode,
             &ffi_input,
             &error_out);
         distributed = true;
@@ -419,16 +433,21 @@ unique_ptr<GlobalTableFunctionState> init_global(ClientContext &context, TableFu
     }
 
     auto cdata = unique_ptr<CData>(reinterpret_cast<CData *>(ffi_global_data));
-    const auto force_empty_output = distributed && bind_data.explicit_task_mode && bind_data.tasks_applied &&
-                                    bind_data.assigned_file_indexes.empty();
+#ifdef VORTEX_DISTRIBUTED_SCAN
+    bool force_empty_output = false;
+    force_empty_output = distributed && bind_data.explicit_task_mode && bind_data.tasks_applied &&
+                         bind_data.assigned_file_indexes.empty();
     return make_uniq<VortexGlobalData>(std::move(cdata), distributed, force_empty_output);
+#else
+    return make_uniq<VortexGlobalData>(std::move(cdata));
+#endif
 }
 
 unique_ptr<LocalTableFunctionState>
 init_local(ExecutionContext &, TableFunctionInitInput &input, GlobalTableFunctionState *global_state) {
-    auto &global = global_state->Cast<VortexGlobalData>();
     const void *ffi_bind;
 #ifdef VORTEX_DISTRIBUTED_SCAN
+    auto &global = global_state->Cast<VortexGlobalData>();
     if (global.distributed) {
         ffi_bind = duckdb_table_function_distributed_bind_data(global.ffi_data->DataPtr());
     } else
@@ -444,11 +463,13 @@ init_local(ExecutionContext &, TableFunctionInitInput &input, GlobalTableFunctio
 }
 
 void function(ClientContext &, TableFunctionInput &input, DataChunk &output) {
+#ifdef VORTEX_DISTRIBUTED_SCAN
     auto &global = input.global_state->Cast<VortexGlobalData>();
     if (global.force_empty_output) {
         output.SetCardinality(0);
         return;
     }
+#endif
     void *const ffi_global = get_ffi_global(input.global_state.get());
     void *const ffi_local = get_ffi_local(input.local_state.get());
 
@@ -1153,19 +1174,21 @@ static TableFunctionDistributedScanCallbacks VortexDistributedScanCallbacks() {
 } // namespace
 #endif
 
-duckdb_state register_table_function(DatabaseInstance &db, LogicalType parameter, const std::string &name) {
+static TableFunction CreateVortexTableFunction(LogicalType parameter, const std::string &name) {
     TableFunction tf(name, {}, function, duckdb_vx_table_function_bind, init_global, init_local);
 
     tf.projection_pushdown = true;
     tf.filter_pushdown = true;
     tf.filter_prune = true;
     tf.sampling_pushdown = false;
+#ifdef VORTEX_DISTRIBUTED_SCAN
     tf.supports_pushdown_type = [](const FunctionData &, idx_t column_id) {
         // file_index is constant per partition and is evaluated exactly before
         // readers are created. Other virtual-column filters stay in a DuckDB
         // PhysicalFilter so unsupported predicates cannot be silently ignored.
         return !IsVirtualColumn(column_id) || column_id == COLUMN_IDENTIFIER_FILE_INDEX;
     };
+#endif
 
     tf.pushdown_expression = [](auto &, const auto &, Expression &expression) {
         return duckdb_table_function_pushdown_expression(reinterpret_cast<duckdb_vx_expr>(&expression));
@@ -1215,6 +1238,12 @@ duckdb_state register_table_function(DatabaseInstance &db, LogicalType parameter
     tf.arguments.resize(1);
     tf.arguments[0] = parameter;
 
+    return tf;
+}
+
+duckdb_state register_table_function(DatabaseInstance &db, LogicalType parameter, const std::string &name) {
+    auto tf = CreateVortexTableFunction(std::move(parameter), name);
+
     try {
         auto &system_catalog = Catalog::GetSystemCatalog(db);
         auto data = CatalogTransaction::GetSystemTransaction(db);
@@ -1228,6 +1257,17 @@ duckdb_state register_table_function(DatabaseInstance &db, LogicalType parameter
     }
     return DuckDBSuccess;
 }
+
+#ifdef VORTEX_DISTRIBUTED_SCAN
+void RegisterVortexTableFunctions(ExtensionLoader &loader) {
+    for (const std::string &name : {"read_vortex"s, "vortex_scan"s}) {
+        TableFunctionSet functions(name);
+        functions.AddFunction(CreateVortexTableFunction(LogicalType::VARCHAR, name));
+        functions.AddFunction(CreateVortexTableFunction(LogicalType::LIST(LogicalType::VARCHAR), name));
+        loader.RegisterFunction(std::move(functions));
+    }
+}
+#endif
 
 extern "C" duckdb_state duckdb_vx_register_table_functions(duckdb_database ffi_db) {
     D_ASSERT(ffi_db);

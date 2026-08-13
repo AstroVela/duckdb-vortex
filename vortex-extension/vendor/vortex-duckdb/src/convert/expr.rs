@@ -588,18 +588,21 @@ fn try_from_expression_inner(
         }
         BoundColumnRef(col_ref) => {
             let name = col_ref.name.as_ref();
-            // DuckDB exposes multi-file virtual columns such as `file_index`
-            // to complex-filter pushdown even though they are not part of the
-            // Vortex struct dtype. Keep those expressions in DuckDB's table
-            // filter path: Vortex evaluates the virtual-column selection per
-            // partition, and the distributed planner can use the same table
-            // filter to prune explicit file tasks. Turning an unknown name
-            // into `col(name)` here would only fail later when the Vortex scan
-            // validates the expression against its physical input scope.
-            if let Some(fields) = ctx.fields
-                && !fields.iter().any(|field| field.name == name)
+            #[cfg(feature = "vane")]
             {
-                return Ok(None);
+                // DuckDB exposes multi-file virtual columns such as `file_index`
+                // to complex-filter pushdown even though they are not part of the
+                // Vortex struct dtype. Keep those expressions in DuckDB's table
+                // filter path: Vortex evaluates the virtual-column selection per
+                // partition, and the distributed planner can use the same table
+                // filter to prune explicit file tasks. Turning an unknown name
+                // into `col(name)` here would only fail later when the Vortex scan
+                // validates the expression against its physical input scope.
+                if let Some(fields) = ctx.fields
+                    && !fields.iter().any(|field| field.name == name)
+                {
+                    return Ok(None);
+                }
             }
             col(name)
         }

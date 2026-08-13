@@ -12,6 +12,9 @@ crate-type = ["staticlib", "cdylib"]
 [dependencies]
 vortex-duckdb = { path = "vendor/vortex-duckdb" }
 
+[features]
+vane = ["vortex-duckdb/vane"]
+
 # This improved build times significantly
 [profile.dev.package.vortex-fastlanes]
 debug = false
