@@ -213,12 +213,31 @@ When a PR is merged to `main`, the cherry-pick workflow automatically applies th
 
 The current release branch is configured in `.github/workflows/CherryPick.yml` via the `RELEASE_BRANCH` env var.
 
-## Changing Vortex version
+## Updating the vendored Vortex source
 
-The Vortex version is defined in `vortex-extension/Cargo.toml`. It can be a git commit, tag, branch or even a local path:
+The extension always builds the checked-in
+`vortex-extension/vendor/vortex-duckdb` crate. The path dependency in
+`vortex-extension/Cargo.toml` is intentional and is not a Vortex version pin;
+changing only that manifest does not upgrade Vortex.
 
-```toml
-vortex-duckdb = { path = "<path/to/vortex/vortex-duckdb>"}
-```
+To update Vortex:
 
-See the Cargo docs for [git](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#specifying-dependencies-from-git-repositories) or [path](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#specifying-path-dependencies) dependencies for full details.
+1. Choose an immutable, full commit SHA from
+   [`vortex-data/vortex`](https://github.com/vortex-data/vortex).
+2. Update the files in `vortex-extension/vendor/vortex-duckdb` from that
+   commit's `vortex-duckdb` directory, then reapply and review the local
+   Vane-gated changes described in the vendored README.
+3. Set every Vortex workspace dependency revision in
+   `vortex-extension/vendor/vortex-duckdb/Cargo.toml` (`vortex`, `vortex-geo`,
+   and `vortex-utils`) to the same commit SHA.
+4. Update the upstream commit link in
+   `vortex-extension/vendor/vortex-duckdb/README.md`.
+5. Regenerate `vortex-extension/Cargo.lock` from the `vortex-extension`
+   directory and confirm that all `vortex-data/vortex` Git sources resolve to
+   the selected SHA.
+6. Run the ordinary DuckDB build/tests and the Vane protocol, sanitizer, and
+   Ray integration lanes before committing the upgrade.
+
+A temporary path override may be useful during local development, but it must
+not replace the checked-in vendored snapshot or its recorded upstream SHA in a
+committed upgrade.
