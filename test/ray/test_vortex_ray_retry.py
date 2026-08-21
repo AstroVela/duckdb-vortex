@@ -18,14 +18,20 @@ import vane
 
 ROOT = Path(__file__).resolve().parents[2]
 VANE_TESTS = ROOT / "vane" / "tests"
-sys.path.insert(0, str(VANE_TESTS))
-sys.path.insert(0, str(VANE_TESTS / "fast"))
 
 # Reuse Vane's production-actor fault harness. It owns the retry scheduler,
 # worker replacement, and dynamic split replay mechanics that this extension
-# integration test needs to exercise.
-fault = importlib.import_module("test_ray_fte_fault_injection")
-result_contract = importlib.import_module("test_ray_result_contract")
+# integration test needs to exercise. Keep Vane's test directories scoped to
+# these imports: tests/fast contains a pandas namespace that would otherwise
+# shadow PyArrow's optional pandas dependency during the Vortex result tests.
+_original_sys_path = list(sys.path)
+try:
+    sys.path.insert(0, str(VANE_TESTS))
+    sys.path.insert(0, str(VANE_TESTS / "fast"))
+    fault = importlib.import_module("test_ray_fte_fault_injection")
+    result_contract = importlib.import_module("test_ray_result_contract")
+finally:
+    sys.path[:] = _original_sys_path
 
 pytestmark = [pytest.mark.real_ray, pytest.mark.ray_cluster_owner]
 
