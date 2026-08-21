@@ -5,7 +5,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/execution/distributed/pipeline_node/pipeline_node.hpp"
 #include "duckdb/execution/distributed/pipeline_node/translator_scan.hpp"
-#include "duckdb/execution/distributed/plan/scan_task.hpp"
+#include "duckdb/execution/distributed/plan/scan_split.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/main/connection.hpp"
@@ -124,10 +124,26 @@ void CheckEmptyAggregateRow(QueryResult &result) {
 
 struct PlannedScan {
 	distributed::DuckPhysicalPlanRef worker_plan;
-	vector<distributed::ScanTaskDescriptor> descriptors;
+	vector<distributed::ScanSplit> splits;
 	vector<LogicalType> result_types;
 	vector<string> result_names;
 };
+
+distributed::ScanSplitBatch MakeSplitBatch(vector<distributed::ScanSplit> splits) {
+	distributed::ScanSplitBatch batch;
+	batch.splits = std::move(splits);
+	batch.Validate();
+	return batch;
+}
+
+distributed::ScanSplitBatch MakeSplitBatch(const distributed::ScanSplit &split) {
+	return MakeSplitBatch(vector<distributed::ScanSplit> {split});
+}
+
+distributed::ScanSplitBatch MakeEmptySplitBatch(const distributed::ScanSplit &reference) {
+	return MakeSplitBatch(
+	    distributed::ScanSplit::EmptyExtension(reference.extension_capability, reference.split_codec));
+}
 
 void FindTableScans(PhysicalOperator &op, vector<reference<PhysicalTableScan>> &result) {
 	if (op.type == PhysicalOperatorType::TABLE_SCAN) {
@@ -164,10 +180,8 @@ PlannedScan PlanScan(DuckDB &database, Connection &connection, const string &sql
 	distributed::DuckDBExecutionConfig config;
 	config.set_distributed_worker_slots(worker_slots);
 	PlannedScan result;
-	result.worker_plan = distributed::MakeTableScanPlan(coordinator_scan, connection.context.get());
-	auto task_set = distributed::MakeTableScanTasks(coordinator_scan, config, database.instance);
-	Check(!task_set.known_empty, "non-empty Vortex scan was planned as known empty");
-	result.descriptors = std::move(task_set.tasks);
+	result.worker_plan = distributed::MakeTableScanPlan(coordinator_scan);
+	result.splits = distributed::MakeTableScanSplits(coordinator_scan, config, database.instance);
 	// MakeTableScanPlan extracts the scan from any projection wrapper. Use the
 	// scan's physical output order when constructing PreparedStatementData.
 	result.result_types = result.worker_plan->Root().GetTypes();
@@ -195,13 +209,14 @@ unique_ptr<PhysicalPlan> CloneNativePlan(const distributed::DuckPhysicalPlanRef 
 	return plan;
 }
 
-void ApplyDescriptor(PhysicalPlan &plan, idx_t scan_node_id, const distributed::ScanTaskDescriptor &descriptor) {
-	unordered_map<idx_t, distributed::ScanTaskDescriptor> assignments;
-	assignments.emplace(scan_node_id, descriptor);
+void ApplySplitBatch(PhysicalPlan &plan, idx_t scan_node_id, const distributed::ScanSplitBatch &batch) {
+	unordered_map<idx_t, distributed::ScanSplitBatch> assignments;
+	assignments.emplace(scan_node_id, batch);
 	string error;
-	Check(distributed::ApplyScanTasksToPlan(plan, assignments, &error), "failed to apply Vortex task: " + error);
-	Check(distributed::ValidateDistributedScanTasksApplied(plan, &error),
-	      "applied Vortex task did not validate: " + error);
+	Check(distributed::ApplyScanSplitBatchesToPlan(plan, assignments, &error),
+	      "failed to apply Vortex split batch: " + error);
+	Check(distributed::ValidateDistributedScanSplitsApplied(plan, &error),
+	      "applied Vortex split batch did not validate: " + error);
 }
 
 unique_ptr<QueryResult> ExecutePlan(Connection &worker, unique_ptr<PhysicalPlan> plan, const vector<LogicalType> &types,
@@ -223,9 +238,9 @@ unique_ptr<QueryResult> ExecutePlan(Connection &worker, unique_ptr<PhysicalPlan>
 }
 
 vector<ResultRow> ExecuteAssigned(const PlannedScan &planned, Connection &worker,
-                                  const distributed::ScanTaskDescriptor &descriptor, idx_t scan_node_id) {
+                                  const distributed::ScanSplitBatch &batch, idx_t scan_node_id) {
 	auto plan = ClonePlan(planned.worker_plan, worker, scan_node_id);
-	ApplyDescriptor(*plan, scan_node_id, descriptor);
+	ApplySplitBatch(*plan, scan_node_id, batch);
 	auto result = ExecutePlan(worker, std::move(plan), planned.result_types, planned.result_names,
 	                          "test:vortex-distributed-assigned");
 	Check(result != nullptr, "assigned worker returned no result");
@@ -233,19 +248,19 @@ vector<ResultRow> ExecuteAssigned(const PlannedScan &planned, Connection &worker
 }
 
 AggregateRow ExecuteAggregateAssigned(const PlannedScan &planned, Connection &worker,
-                                      const distributed::ScanTaskDescriptor &descriptor, idx_t scan_node_id) {
+                                      const distributed::ScanSplitBatch &batch, idx_t scan_node_id) {
 	auto plan = ClonePlan(planned.worker_plan, worker, scan_node_id);
-	ApplyDescriptor(*plan, scan_node_id, descriptor);
+	ApplySplitBatch(*plan, scan_node_id, batch);
 	auto result = ExecutePlan(worker, std::move(plan), planned.result_types, planned.result_names,
 	                          "test:vortex-distributed-aggregate-assigned");
 	Check(result != nullptr, "aggregate worker returned no result");
 	return ReadAggregateRow(*result);
 }
 
-idx_t ExecuteAssignedRowCount(const PlannedScan &planned, Connection &worker,
-                              const distributed::ScanTaskDescriptor &descriptor, idx_t scan_node_id) {
+idx_t ExecuteAssignedRowCount(const PlannedScan &planned, Connection &worker, const distributed::ScanSplitBatch &batch,
+                              idx_t scan_node_id) {
 	auto plan = ClonePlan(planned.worker_plan, worker, scan_node_id);
-	ApplyDescriptor(*plan, scan_node_id, descriptor);
+	ApplySplitBatch(*plan, scan_node_id, batch);
 	auto result = ExecutePlan(worker, std::move(plan), planned.result_types, planned.result_names,
 	                          "test:vortex-distributed-row-count");
 	Check(result != nullptr && !result->HasError(), "row-count worker execution failed");
@@ -254,65 +269,60 @@ idx_t ExecuteAssignedRowCount(const PlannedScan &planned, Connection &worker,
 	return materialized->RowCount();
 }
 
-void RecomputeDescriptorEstimates(distributed::ScanTaskDescriptor &descriptor) {
-	descriptor.estimated_cardinality = 0;
-	descriptor.estimated_bytes = 0;
-	for (const auto &task : descriptor.extension_tasks) {
-		if (task.estimated_cardinality.IsValid()) {
-			descriptor.estimated_cardinality += task.estimated_cardinality.GetIndex();
-		}
-		if (task.estimated_bytes.IsValid()) {
-			descriptor.estimated_bytes += task.estimated_bytes.GetIndex();
-		}
-	}
-}
-
-void ExpectApplyFailure(const PlannedScan &planned, Connection &worker,
-                        const distributed::ScanTaskDescriptor &descriptor, const string &expected) {
+void ExpectApplyFailure(const PlannedScan &planned, Connection &worker, const distributed::ScanSplitBatch &batch,
+                        const string &expected) {
 	try {
 		auto plan = ClonePlan(planned.worker_plan, worker, 900);
-		unordered_map<idx_t, distributed::ScanTaskDescriptor> assignments;
-		assignments.emplace(900, descriptor);
+		unordered_map<idx_t, distributed::ScanSplitBatch> assignments;
+		assignments.emplace(900, batch);
 		string error;
-		if (!distributed::ApplyScanTasksToPlan(*plan, assignments, &error)) {
+		if (!distributed::ApplyScanSplitBatchesToPlan(*plan, assignments, &error)) {
 			Check(expected.empty() || StringUtil::Contains(error, expected),
 			      "unexpected apply error: " + error + ", expected: " + expected);
 			return;
 		}
-		throw std::runtime_error("invalid Vortex task was accepted");
+		throw std::runtime_error("invalid Vortex split was accepted");
 	} catch (const std::exception &error) {
 		Check(expected.empty() || StringUtil::Contains(error.what(), expected),
 		      "unexpected apply exception: " + string(error.what()) + ", expected: " + expected);
 	}
 }
 
-void ValidateDescriptorContract(const vector<distributed::ScanTaskDescriptor> &descriptors, idx_t file_count,
-                                const string &capability_name = "read_vortex") {
-	Check(!descriptors.empty(), "Vortex planner returned no descriptors");
-	set<string> task_ids;
-	idx_t elementary_count = 0;
-	for (const auto &descriptor : descriptors) {
-		Check(descriptor.kind == distributed::ScanTaskKind::EXTENSION, "Vortex emitted a non-extension task");
-		Check(descriptor.files.empty(), "Vortex extension task unexpectedly contains file tasks");
-		Check(descriptor.extension_capability.extension_name == "vortex", "wrong Vortex capability owner");
-		Check(descriptor.extension_capability.capability.name == capability_name, "wrong Vortex capability name");
-		Check(descriptor.extension_capability.capability.protocol_version == 1, "wrong Vortex protocol version");
-		Check(descriptor.task_codec.name == "vane.vortex-file-task", "wrong Vortex task codec");
-		Check(descriptor.task_codec.version == 1, "wrong Vortex task codec version");
-		for (const auto &task : descriptor.extension_tasks) {
-			Check(!task.task_id.empty(), "empty Vortex task id");
-			Check(!task.payload.empty(), "empty Vortex task payload");
-			Check(task.estimated_cardinality.IsValid(), "missing Vortex task cardinality estimate");
-			Check(task.estimated_bytes.IsValid(), "missing Vortex task byte estimate");
-			Check(task_ids.insert(task.task_id).second, "duplicate planned Vortex task id");
-			elementary_count++;
-		}
-		auto roundtrip = distributed::ScanTaskDescriptor::DeserializeFromBytes(descriptor.SerializeToBytes());
-		Check(roundtrip.extension_tasks.size() == descriptor.extension_tasks.size(),
-		      "descriptor round-trip changed the task count");
-		Check(roundtrip.task_codec == descriptor.task_codec, "descriptor round-trip changed the codec");
+void ValidateSplitContract(const vector<distributed::ScanSplit> &splits, idx_t expected_split_count,
+                           const string &capability_name = "read_vortex") {
+	Check(!splits.empty(), "Vortex planner returned no splits");
+	for (const auto &split : splits) {
+		Check(split.kind == distributed::ScanSplitKind::EXTENSION, "Vortex emitted a non-extension split");
+		Check(split.file.path.empty(), "Vortex extension split unexpectedly contains an engine file");
+		Check(split.extension_capability.extension_name == "vortex", "wrong Vortex capability owner");
+		Check(split.extension_capability.capability.name == capability_name, "wrong Vortex capability name");
+		Check(split.extension_capability.capability.protocol_version == 1, "wrong Vortex protocol version");
+		Check(split.split_codec.name == "vane.vortex-file-split", "wrong Vortex split codec");
+		Check(split.split_codec.version == 1, "wrong Vortex split codec version");
 	}
-	Check(elementary_count == file_count, "Vortex did not plan exactly one task per bound file");
+	if (expected_split_count == 0) {
+		Check(splits.size() == 1 && splits[0].empty, "empty Vortex scan did not produce one explicit empty split");
+		Check(splits[0].split_id == "empty", "empty Vortex scan produced a non-canonical empty split id");
+		Check(splits[0].extension_payload.empty(), "empty Vortex split unexpectedly contains a payload");
+		auto roundtrip =
+		    distributed::ScanSplitBatch::DeserializeFromBytes(MakeSplitBatch(splits[0]).SerializeToBytes());
+		Check(roundtrip.splits.size() == 1 && roundtrip.splits[0].empty,
+		      "empty split batch round-trip changed the empty marker");
+		return;
+	}
+	Check(splits.size() == expected_split_count, "Vortex planned an unexpected elementary split count");
+	set<string> split_ids;
+	for (const auto &split : splits) {
+		Check(!split.empty, "non-empty Vortex scan emitted an empty split");
+		Check(!split.split_id.empty(), "empty Vortex split id");
+		Check(!split.extension_payload.empty(), "empty Vortex split payload");
+		Check(split.estimated_cardinality.IsValid(), "missing Vortex split cardinality estimate");
+		Check(split.estimated_bytes.IsValid(), "missing Vortex split byte estimate");
+		Check(split_ids.insert(split.split_id).second, "duplicate planned Vortex split id");
+		auto roundtrip = distributed::ScanSplitBatch::DeserializeFromBytes(MakeSplitBatch(split).SerializeToBytes());
+		Check(roundtrip.splits.size() == 1, "split batch round-trip changed the split count");
+		Check(roundtrip.splits[0].split_codec == split.split_codec, "split batch round-trip changed the codec");
+	}
 }
 
 void TestProtocol() {
@@ -342,7 +352,7 @@ void TestProtocol() {
 	file_list += "]";
 
 	// DuckDB late materialization rewrites one scan into a self semi-join.
-	// Vane schedules explicit tasks per physical scan, so a distributed-capable
+	// Vane schedules explicit splits per physical scan, so a distributed-capable
 	// Vortex function must retain one scan until grouped multi-scan assignments
 	// are part of the protocol.
 	const auto limited_sql = "SELECT id, payload FROM read_vortex(" + file_list + ") ORDER BY id DESC LIMIT 3";
@@ -355,7 +365,7 @@ void TestProtocol() {
 	      "single-scan limited Vortex baseline failed");
 	auto limited_scan =
 	    PlanScan(coordinator_database, coordinator, limited_sql, 8, limited_result->types, limited_result->names);
-	ValidateDescriptorContract(limited_scan.descriptors, files.size());
+	ValidateSplitContract(limited_scan.splits, files.size());
 	const auto filtered_limited_sql =
 	    "SELECT id, payload FROM read_vortex(" + file_list + ") WHERE id < 15 ORDER BY id DESC LIMIT 3";
 	auto filtered_limited_physical_plan = ExtractPhysicalPlan(coordinator, filtered_limited_sql);
@@ -365,7 +375,7 @@ void TestProtocol() {
 	      "filtered limited Vortex baseline failed");
 	auto filtered_limited_scan = PlanScan(coordinator_database, coordinator, filtered_limited_sql, 8,
 	                                      filtered_limited_result->types, filtered_limited_result->names);
-	ValidateDescriptorContract(filtered_limited_scan.descriptors, files.size());
+	ValidateSplitContract(filtered_limited_scan.splits, files.size());
 
 	const auto scan_sql = "SELECT id, file_index FROM read_vortex(" + file_list + ") WHERE id >= 7 AND id < 25";
 	auto baseline_result = coordinator.Query(scan_sql);
@@ -385,8 +395,8 @@ void TestProtocol() {
 	          ", sum(file_index)=" + std::to_string(baseline_file_sum));
 
 	auto planned = PlanScan(coordinator_database, coordinator, scan_sql, 8, baseline_types, baseline_names);
-	ValidateDescriptorContract(planned.descriptors, files.size());
-	Check(planned.descriptors.size() == files.size(), "workers > tasks changed elementary task count");
+	ValidateSplitContract(planned.splits, files.size());
+	Check(planned.splits.size() == files.size(), "workers > splits changed elementary split count");
 
 	DuckDB worker_database(nullptr);
 	Connection worker(worker_database);
@@ -415,21 +425,21 @@ void TestProtocol() {
 	          filtered_limited_native_materialized->GetValue(0, 2).GetValue<int64_t>() == 12,
 	      "native filtered TopN Vortex physical-plan round-trip dropped its required predicate");
 	idx_t limited_scan_rows = 0;
-	for (idx_t descriptor_index = 0; descriptor_index < limited_scan.descriptors.size(); descriptor_index++) {
-		limited_scan_rows += ExecuteAssignedRowCount(limited_scan, worker, limited_scan.descriptors[descriptor_index],
-		                                             25 + descriptor_index);
+	for (idx_t split_index = 0; split_index < limited_scan.splits.size(); split_index++) {
+		limited_scan_rows += ExecuteAssignedRowCount(
+		    limited_scan, worker, MakeSplitBatch(limited_scan.splits[split_index]), 25 + split_index);
 	}
 	Check(limited_scan_rows == files.size() * 10, "detached TopN scan incorrectly applied an optional dynamic filter");
 	idx_t filtered_limited_scan_rows = 0;
-	for (idx_t descriptor_index = 0; descriptor_index < filtered_limited_scan.descriptors.size(); descriptor_index++) {
+	for (idx_t split_index = 0; split_index < filtered_limited_scan.splits.size(); split_index++) {
 		filtered_limited_scan_rows += ExecuteAssignedRowCount(
-		    filtered_limited_scan, worker, filtered_limited_scan.descriptors[descriptor_index], 35 + descriptor_index);
+		    filtered_limited_scan, worker, MakeSplitBatch(filtered_limited_scan.splits[split_index]), 35 + split_index);
 	}
 	Check(filtered_limited_scan_rows == 15,
 	      "ignoring a detached TopN dynamic filter also dropped its required sibling predicate");
 
 	// The Vortex-owned bind path must retain ordinary absolute-path glob
-	// semantics. Canonical sorting also makes the file index and task payload
+	// semantics. Canonical sorting also makes the file index and split payload
 	// stable even when the underlying object store lists entries out of order.
 	const auto glob_scan_sql = "SELECT id, file_index FROM read_vortex(" + SQLString(temp.path / "part-*.vortex") +
 	                           ") WHERE id >= 7 AND id < 25";
@@ -440,15 +450,13 @@ void TestProtocol() {
 	Check(glob_baseline_rows == baseline_rows, "absolute-path Vortex glob changed local file ordering or results");
 	auto glob_plan = PlanScan(coordinator_database, coordinator, glob_scan_sql, 8, glob_baseline_result->types,
 	                          glob_baseline_result->names);
-	ValidateDescriptorContract(glob_plan.descriptors, files.size());
+	ValidateSplitContract(glob_plan.splits, files.size());
 	vector<ResultRow> glob_distributed_rows;
-	for (idx_t descriptor_index = 0; descriptor_index < glob_plan.descriptors.size(); descriptor_index++) {
-		const auto &descriptor = glob_plan.descriptors[descriptor_index];
-		Check(descriptor.extension_tasks.size() == 1, "glob task assignment was unexpectedly merged");
-		const auto &task = descriptor.extension_tasks.front();
-		Check(task.payload.find("part-" + task.task_id + ".vortex") != string::npos,
-		      "glob task id does not match its canonically sorted file payload");
-		auto rows = ExecuteAssigned(glob_plan, worker, descriptor, 50 + descriptor_index);
+	for (idx_t split_index = 0; split_index < glob_plan.splits.size(); split_index++) {
+		const auto &split = glob_plan.splits[split_index];
+		Check(split.extension_payload.find("part-" + split.split_id + ".vortex") != string::npos,
+		      "glob split id does not match its canonically sorted file payload");
+		auto rows = ExecuteAssigned(glob_plan, worker, MakeSplitBatch(split), 50 + split_index);
 		glob_distributed_rows.insert(glob_distributed_rows.end(), rows.begin(), rows.end());
 	}
 	std::sort(glob_distributed_rows.begin(), glob_distributed_rows.end());
@@ -462,20 +470,20 @@ void TestProtocol() {
 	Check(alias_baseline_result != nullptr && !alias_baseline_result->HasError(), "vortex_scan alias baseline failed");
 	auto alias_plan = PlanScan(coordinator_database, coordinator, alias_sql, 8, alias_baseline_result->types,
 	                           alias_baseline_result->names, "vortex_scan");
-	ValidateDescriptorContract(alias_plan.descriptors, files.size(), "vortex_scan");
+	ValidateSplitContract(alias_plan.splits, files.size(), "vortex_scan");
 	vector<ResultRow> alias_distributed_rows;
-	for (idx_t descriptor_index = 0; descriptor_index < alias_plan.descriptors.size(); descriptor_index++) {
+	for (idx_t split_index = 0; split_index < alias_plan.splits.size(); split_index++) {
 		auto rows =
-		    ExecuteAssigned(alias_plan, worker, alias_plan.descriptors[descriptor_index], 75 + descriptor_index);
+		    ExecuteAssigned(alias_plan, worker, MakeSplitBatch(alias_plan.splits[split_index]), 75 + split_index);
 		alias_distributed_rows.insert(alias_distributed_rows.end(), rows.begin(), rows.end());
 	}
 	std::sort(alias_distributed_rows.begin(), alias_distributed_rows.end());
 	Check(alias_distributed_rows == baseline_rows, "distributed vortex_scan alias differs from baseline");
 
 	// Ordinary DuckDB plan serialization uses the same bind serde without
-	// invoking Vane's prepare_bind callback. Deserialization must remain I/O-free,
+	// invoking Vane's create_worker_bind callback. Deserialization must remain I/O-free,
 	// then reconstruct the complete already-bound file set in the real execution
-	// context instead of requiring a distributed descriptor.
+	// context instead of requiring a distributed split batch.
 	auto native_source = ExtractPhysicalPlan(coordinator, scan_sql);
 	auto native_types = native_source->Root().GetTypes();
 	auto native_hidden_path = temp.path;
@@ -508,13 +516,14 @@ void TestProtocol() {
 		std::filesystem::rename(hidden_path, temp.path);
 		throw;
 	}
-	ApplyDescriptor(*lifecycle_plan, 100, planned.descriptors.front());
+	auto first_batch = MakeSplitBatch(planned.splits.front());
+	ApplySplitBatch(*lifecycle_plan, 100, first_batch);
 	auto retry_plan_ref = distributed::DuckPhysicalPlanRef(lifecycle_plan.release());
 	auto retry_clone = ClonePlan(retry_plan_ref, worker, 100);
 	// Physical-plan cloning intentionally resets Vane's runtime-applied marker.
-	// Re-applying the same descriptor must be safe; the bind serde still carries
+	// Re-applying the same split batch must be safe; the bind serde still carries
 	// the assignment and cannot broaden it while cloning.
-	ApplyDescriptor(*retry_clone, 100, planned.descriptors.front());
+	ApplySplitBatch(*retry_clone, 100, first_batch);
 	auto retry_result = ExecutePlan(worker, std::move(retry_clone), baseline_types, baseline_names,
 	                                "test:vortex-distributed-retry-clone");
 	Check(retry_result != nullptr && !retry_result->HasError(), "retry clone execution failed");
@@ -522,20 +531,20 @@ void TestProtocol() {
 	// Re-applying the identical assignment is idempotent, while changing an
 	// already-applied bind in place must fail. FTE retries clone the detached
 	// plan; they never mutate one execution from file A into file B.
-	Check(planned.descriptors.size() > 1, "expected multiple descriptors for reassignment test");
+	Check(planned.splits.size() > 1, "expected multiple splits for reassignment test");
 	auto idempotent_plan = ClonePlan(planned.worker_plan, worker, 125);
-	ApplyDescriptor(*idempotent_plan, 125, planned.descriptors[0]);
-	ApplyDescriptor(*idempotent_plan, 125, planned.descriptors[0]);
+	ApplySplitBatch(*idempotent_plan, 125, MakeSplitBatch(planned.splits[0]));
+	ApplySplitBatch(*idempotent_plan, 125, MakeSplitBatch(planned.splits[0]));
 	string reassignment_error;
 	try {
-		ApplyDescriptor(*idempotent_plan, 125, planned.descriptors[1]);
+		ApplySplitBatch(*idempotent_plan, 125, MakeSplitBatch(planned.splits[1]));
 	} catch (const std::exception &error) {
 		reassignment_error = error.what();
 	}
-	Check(StringUtil::Contains(reassignment_error, "different explicit task assignment"),
+	Check(StringUtil::Contains(reassignment_error, "different explicit split assignment"),
 	      "Vortex accepted a different assignment on an already-applied bind: " + reassignment_error);
 
-	// File identity is resolved only from the descriptor and immutable bind. If
+	// File identity is resolved only from the split and immutable bind. If
 	// the bound object disappears before a retry, fail explicitly instead of
 	// re-globbing a replacement or widening the scan.
 	auto missing_file = files[0];
@@ -543,7 +552,7 @@ void TestProtocol() {
 	std::filesystem::rename(files[0], missing_file);
 	string missing_file_error;
 	try {
-		(void)ExecuteAssigned(planned, worker, planned.descriptors.front(), 150);
+		(void)ExecuteAssigned(planned, worker, first_batch, 150);
 	} catch (const std::exception &error) {
 		missing_file_error = error.what();
 	}
@@ -563,7 +572,7 @@ void TestProtocol() {
 	}
 	string changed_file_error;
 	try {
-		(void)ExecuteAssigned(planned, worker, planned.descriptors.front(), 175);
+		(void)ExecuteAssigned(planned, worker, first_batch, 175);
 	} catch (const std::exception &error) {
 		changed_file_error = error.what();
 	}
@@ -572,10 +581,10 @@ void TestProtocol() {
 	      "changed bound Vortex file did not fail with an identity error: " + changed_file_error);
 
 	vector<ResultRow> distributed_rows;
-	for (idx_t descriptor_index = 0; descriptor_index < planned.descriptors.size(); descriptor_index++) {
-		auto roundtrip = distributed::ScanTaskDescriptor::DeserializeFromBytes(
-		    planned.descriptors[descriptor_index].SerializeToBytes());
-		auto rows = ExecuteAssigned(planned, worker, roundtrip, 200 + descriptor_index);
+	for (idx_t split_index = 0; split_index < planned.splits.size(); split_index++) {
+		auto roundtrip = distributed::ScanSplitBatch::DeserializeFromBytes(
+		    MakeSplitBatch(planned.splits[split_index]).SerializeToBytes());
+		auto rows = ExecuteAssigned(planned, worker, roundtrip, 200 + split_index);
 		distributed_rows.insert(distributed_rows.end(), rows.begin(), rows.end());
 	}
 	std::sort(distributed_rows.begin(), distributed_rows.end());
@@ -593,11 +602,11 @@ void TestProtocol() {
 	Check(expression_baseline_rows.size() == 12, "unexpected projection/complex-filter baseline cardinality");
 	auto expression_plan = PlanScan(coordinator_database, coordinator, expression_sql, 8,
 	                                expression_baseline_result->types, expression_baseline_result->names);
-	ValidateDescriptorContract(expression_plan.descriptors, files.size());
+	ValidateSplitContract(expression_plan.splits, files.size());
 	vector<ResultRow> expression_rows;
-	for (idx_t descriptor_index = 0; descriptor_index < expression_plan.descriptors.size(); descriptor_index++) {
-		auto rows = ExecuteAssigned(expression_plan, worker, expression_plan.descriptors[descriptor_index],
-		                            225 + descriptor_index);
+	for (idx_t split_index = 0; split_index < expression_plan.splits.size(); split_index++) {
+		auto rows = ExecuteAssigned(expression_plan, worker, MakeSplitBatch(expression_plan.splits[split_index]),
+		                            225 + split_index);
 		expression_rows.insert(expression_rows.end(), rows.begin(), rows.end());
 	}
 	std::sort(expression_rows.begin(), expression_rows.end());
@@ -606,7 +615,7 @@ void TestProtocol() {
 
 	// A file_index predicate can be evaluated without opening readers. The
 	// coordinator must omit files that cannot match while preserving the stable
-	// original file index in the task id and worker output.
+	// original file index in the split id and worker output.
 	const auto pruned_sql =
 	    "SELECT id, file_index FROM read_vortex(" + file_list + ") WHERE file_index = 1 AND id >= 12 AND id < 18";
 	auto pruned_baseline_result = coordinator.Query(pruned_sql);
@@ -616,21 +625,19 @@ void TestProtocol() {
 	Check(pruned_baseline_rows.size() == 6, "unexpected file_index-pruned baseline cardinality");
 	auto pruned = PlanScan(coordinator_database, coordinator, pruned_sql, 8, pruned_baseline_result->types,
 	                       pruned_baseline_result->names);
-	ValidateDescriptorContract(pruned.descriptors, 1);
-	Check(pruned.descriptors.size() == 1 && pruned.descriptors[0].extension_tasks.size() == 1,
-	      "file_index predicate did not prune the distributed task set");
-	Check(pruned.descriptors[0].extension_tasks[0].task_id == "1",
-	      "file_index pruning changed the stable coordinator task id");
-	Check(ExecuteAssigned(pruned, worker, pruned.descriptors[0], 250) == pruned_baseline_rows,
+	ValidateSplitContract(pruned.splits, 1);
+	Check(pruned.splits.size() == 1, "file_index predicate did not prune the distributed split set");
+	Check(pruned.splits[0].split_id == "1", "file_index pruning changed the stable coordinator split id");
+	Check(ExecuteAssigned(pruned, worker, MakeSplitBatch(pruned.splits[0]), 250) == pruned_baseline_rows,
 	      "file_index-pruned worker result differs from baseline");
-	// A descriptor can be structurally valid and reference a file from the same
+	// A split can be structurally valid and reference a file from the same
 	// immutable bind while still being outside this scan's coordinator-pruned
-	// task set. Applying such a descriptor must fail rather than broaden the
+	// split set. Applying such a split must fail rather than broaden the
 	// worker scan.
-	ExpectApplyFailure(pruned, worker, planned.descriptors.front(), "outside the planned file set");
+	ExpectApplyFailure(pruned, worker, first_batch, "outside the planned file set");
 
 	// Non-range virtual filters must be evaluated rather than silently treated
-	// as Selection::All. Both task planning and runtime reader construction use
+	// as Selection::All. Both split planning and runtime reader construction use
 	// the same exact file-index predicate evaluation.
 	const auto not_equal_sql = "SELECT id, file_index FROM read_vortex(" + file_list + ") WHERE file_index != 1";
 	auto not_equal_baseline_result = coordinator.Query(not_equal_sql);
@@ -640,18 +647,18 @@ void TestProtocol() {
 	Check(not_equal_baseline_rows.size() == 20, "file_index-not-equal local filter returned the wrong row count");
 	auto not_equal = PlanScan(coordinator_database, coordinator, not_equal_sql, 8, not_equal_baseline_result->types,
 	                          not_equal_baseline_result->names);
-	ValidateDescriptorContract(not_equal.descriptors, 2);
-	Check(not_equal.descriptors.size() == 2 && not_equal.descriptors[0].extension_tasks[0].task_id == "0" &&
-	          not_equal.descriptors[1].extension_tasks[0].task_id == "2",
-	      "file_index-not-equal predicate planned the wrong task set");
+	ValidateSplitContract(not_equal.splits, 2);
+	Check(not_equal.splits.size() == 2 && not_equal.splits[0].split_id == "0" && not_equal.splits[1].split_id == "2",
+	      "file_index-not-equal predicate planned the wrong split set");
 	vector<ResultRow> not_equal_rows;
-	for (idx_t descriptor_index = 0; descriptor_index < not_equal.descriptors.size(); descriptor_index++) {
-		auto rows = ExecuteAssigned(not_equal, worker, not_equal.descriptors[descriptor_index], 260 + descriptor_index);
+	for (idx_t split_index = 0; split_index < not_equal.splits.size(); split_index++) {
+		auto rows =
+		    ExecuteAssigned(not_equal, worker, MakeSplitBatch(not_equal.splits[split_index]), 260 + split_index);
 		not_equal_rows.insert(not_equal_rows.end(), rows.begin(), rows.end());
 	}
 	std::sort(not_equal_rows.begin(), not_equal_rows.end());
 	Check(not_equal_rows == not_equal_baseline_rows, "file_index-not-equal distributed result differs from baseline");
-	ExpectApplyFailure(not_equal, worker, planned.descriptors[1], "outside the planned file set");
+	ExpectApplyFailure(not_equal, worker, MakeSplitBatch(planned.splits[1]), "outside the planned file set");
 
 	const auto row_number_sql =
 	    "SELECT id, file_row_number FROM read_vortex(" + file_list + ") WHERE file_row_number != 0";
@@ -660,39 +667,37 @@ void TestProtocol() {
 	Check(ReadRows(*row_number_result).size() == 27, "file_row_number fallback filter returned the wrong row count");
 
 	// If coordinator pruning removes every file, Vane still transports one
-	// legal extension descriptor with an empty elementary-task array.
+	// legal explicit empty extension split.
 	const auto no_match_sql = "SELECT id, file_index FROM read_vortex(" + file_list + ") WHERE file_index = 99";
 	auto no_match_baseline_result = coordinator.Query(no_match_sql);
 	Check(no_match_baseline_result != nullptr && !no_match_baseline_result->HasError(),
-	      "empty-task local Vortex baseline failed");
-	Check(ReadRows(*no_match_baseline_result).empty(), "empty-task local baseline returned rows");
+	      "empty-split local Vortex baseline failed");
+	Check(ReadRows(*no_match_baseline_result).empty(), "empty-split local baseline returned rows");
 	auto no_match = PlanScan(coordinator_database, coordinator, no_match_sql, 8, no_match_baseline_result->types,
 	                         no_match_baseline_result->names);
-	ValidateDescriptorContract(no_match.descriptors, 0);
-	Check(no_match.descriptors.size() == 1 && no_match.descriptors[0].extension_tasks.empty(),
-	      "fully pruned Vortex scan did not produce an empty extension descriptor");
-	Check(ExecuteAssigned(no_match, worker, no_match.descriptors[0], 275).empty(),
-	      "fully pruned Vortex descriptor scanned data");
+	ValidateSplitContract(no_match.splits, 0);
+	Check(ExecuteAssigned(no_match, worker, MakeSplitBatch(no_match.splits[0]), 275).empty(),
+	      "fully pruned Vortex split scanned data");
 
-	// One descriptor may carry multiple elementary tasks.
+	// Planning always emits elementary singleton splits. The scheduler may merge
+	// multiple compatible splits into one worker batch.
 	auto merged = PlanScan(coordinator_database, coordinator, scan_sql, 1, baseline_types, baseline_names);
-	Check(merged.descriptors.size() == 1, "one worker slot did not merge Vortex file tasks");
-	Check(merged.descriptors[0].extension_tasks.size() == files.size(),
-	      "merged descriptor does not contain every file task");
-	Check(ExecuteAssigned(merged, worker, merged.descriptors[0], 300) == baseline_rows,
-	      "merged Vortex task result differs from baseline");
-	auto reordered_merged = merged.descriptors[0];
-	std::reverse(reordered_merged.extension_tasks.begin(), reordered_merged.extension_tasks.end());
+	ValidateSplitContract(merged.splits, files.size());
+	auto merged_batch = MakeSplitBatch(merged.splits);
+	Check(ExecuteAssigned(merged, worker, merged_batch, 300) == baseline_rows,
+	      "merged Vortex split result differs from baseline");
+	auto reordered_merged = merged_batch;
+	std::reverse(reordered_merged.splits.begin(), reordered_merged.splits.end());
 	auto reordered_plan = ClonePlan(merged.worker_plan, worker, 301);
-	ApplyDescriptor(*reordered_plan, 301, merged.descriptors[0]);
-	ApplyDescriptor(*reordered_plan, 301, reordered_merged);
+	ApplySplitBatch(*reordered_plan, 301, merged_batch);
+	ApplySplitBatch(*reordered_plan, 301, reordered_merged);
 	auto reordered_result = ExecutePlan(worker, std::move(reordered_plan), baseline_types, baseline_names,
 	                                    "test:vortex-distributed-reordered-assignment");
 	Check(reordered_result != nullptr && ReadRows(*reordered_result) == baseline_rows,
 	      "reordering a merged Vortex assignment changed its meaning");
 
 	// Vortex removes the upper aggregate operator when all aggregates are
-	// pushed into its scan. Such a scan must stay one elementary task containing
+	// pushed into its scan. Such a scan must stay one elementary split containing
 	// the complete bound file set; otherwise workers would emit unmergeable
 	// per-file final aggregates.
 	const auto aggregate_sql = "SELECT min(id), max(id), count(id) FROM read_vortex(" + file_list + ")";
@@ -703,23 +708,20 @@ void TestProtocol() {
 	Check(aggregate_baseline == AggregateRow {0, 29, 30}, "unexpected aggregate-pushed local baseline");
 	auto aggregate_plan = PlanScan(coordinator_database, coordinator, aggregate_sql, 8,
 	                               aggregate_baseline_result->types, aggregate_baseline_result->names);
-	ValidateDescriptorContract(aggregate_plan.descriptors, 1);
-	Check(aggregate_plan.descriptors.size() == 1 && aggregate_plan.descriptors[0].extension_tasks.size() == 1,
-	      "aggregate-pushed Vortex scan was split across workers");
-	Check(aggregate_plan.descriptors[0].extension_tasks[0].task_id == "0,1,2",
-	      "aggregate-pushed Vortex task did not retain its complete stable file set");
-	Check(ExecuteAggregateAssigned(aggregate_plan, worker, aggregate_plan.descriptors[0], 325) == aggregate_baseline,
+	ValidateSplitContract(aggregate_plan.splits, 1);
+	Check(aggregate_plan.splits.size() == 1, "aggregate-pushed Vortex scan was split across workers");
+	Check(aggregate_plan.splits[0].split_id == "0,1,2",
+	      "aggregate-pushed Vortex split did not retain its complete stable file set");
+	Check(ExecuteAggregateAssigned(aggregate_plan, worker, MakeSplitBatch(aggregate_plan.splits[0]), 325) ==
+	          aggregate_baseline,
 	      "aggregate-pushed distributed Vortex result differs from baseline");
-	// A pushed aggregate is indivisible: accepting a valid single-file task in
-	// place of the complete planned file-set task would silently return a partial
+	// A pushed aggregate is indivisible: accepting a valid single-file split in
+	// place of the complete planned file-set split would silently return a partial
 	// final aggregate.
-	ExpectApplyFailure(aggregate_plan, worker, planned.descriptors.front(), "complete planned file set");
-	auto empty_aggregate_descriptor = aggregate_plan.descriptors.front();
-	empty_aggregate_descriptor.extension_tasks.clear();
-	empty_aggregate_descriptor.estimated_cardinality = 0;
-	empty_aggregate_descriptor.estimated_bytes = 0;
-	Check(ExecuteAssignedRowCount(aggregate_plan, worker, empty_aggregate_descriptor, 326) == 0,
-	      "empty aggregate Vortex descriptor emitted an aggregate row");
+	ExpectApplyFailure(aggregate_plan, worker, first_batch, "complete planned file set");
+	auto empty_aggregate_batch = MakeEmptySplitBatch(aggregate_plan.splits.front());
+	Check(ExecuteAssignedRowCount(aggregate_plan, worker, empty_aggregate_batch, 326) == 0,
+	      "empty aggregate Vortex split emitted an aggregate row");
 
 	// A complex filter can live exclusively in the portable Rust bind while the
 	// aggregate above it is also replaced by the Vortex scan. Exercise both
@@ -735,12 +737,12 @@ void TestProtocol() {
 	auto filtered_pushed_aggregate_plan =
 	    PlanScan(coordinator_database, coordinator, filtered_pushed_aggregate_sql, 8,
 	             filtered_pushed_aggregate_result->types, filtered_pushed_aggregate_result->names);
-	ValidateDescriptorContract(filtered_pushed_aggregate_plan.descriptors, 1);
-	Check(filtered_pushed_aggregate_plan.descriptors.size() == 1 &&
-	          filtered_pushed_aggregate_plan.descriptors[0].extension_tasks[0].task_id == "0,1,2",
-	      "complex-filter aggregate was not preserved as one complete Vortex task");
+	ValidateSplitContract(filtered_pushed_aggregate_plan.splits, 1);
+	Check(filtered_pushed_aggregate_plan.splits.size() == 1 &&
+	          filtered_pushed_aggregate_plan.splits[0].split_id == "0,1,2",
+	      "complex-filter aggregate was not preserved as one complete Vortex split");
 	Check(ExecuteAggregateAssigned(filtered_pushed_aggregate_plan, worker,
-	                               filtered_pushed_aggregate_plan.descriptors[0],
+	                               MakeSplitBatch(filtered_pushed_aggregate_plan.splits[0]),
 	                               327) == filtered_pushed_aggregate_baseline,
 	      "complex-filter aggregate-pushed distributed Vortex result differs from baseline");
 
@@ -759,7 +761,7 @@ void TestProtocol() {
 	CheckEmptyAggregateRow(*empty_aggregate_baseline_result);
 
 	// A bound file with an empty logical table remains a normal, retryable
-	// elementary task whose execution returns zero rows.
+	// elementary split whose execution returns zero rows.
 	auto empty_file = temp.path / "empty.vortex";
 	RequireQuerySuccess(
 	    coordinator, "COPY (SELECT CAST(range AS BIGINT) AS id, CAST(NULL AS VARCHAR) AS payload FROM range(0)) TO " +
@@ -770,84 +772,80 @@ void TestProtocol() {
 	Check(ReadRows(*empty_file_baseline).empty(), "empty Vortex file returned local rows");
 	auto empty_file_plan = PlanScan(coordinator_database, coordinator, empty_file_sql, 4, empty_file_baseline->types,
 	                                empty_file_baseline->names);
-	ValidateDescriptorContract(empty_file_plan.descriptors, 1);
-	Check(ExecuteAssigned(empty_file_plan, worker, empty_file_plan.descriptors[0], 350).empty(),
+	ValidateSplitContract(empty_file_plan.splits, 1);
+	Check(ExecuteAssigned(empty_file_plan, worker, MakeSplitBatch(empty_file_plan.splits[0]), 350).empty(),
 	      "empty Vortex file returned distributed rows");
 
-	// An applied empty extension descriptor is a legal zero-row scan.
-	auto empty_descriptor = planned.descriptors.front();
-	empty_descriptor.extension_tasks.clear();
-	empty_descriptor.estimated_cardinality = 0;
-	empty_descriptor.estimated_bytes = 0;
-	auto empty_rows = ExecuteAssigned(planned, worker, empty_descriptor, 400);
-	Check(empty_rows.empty(), "empty Vortex descriptor scanned data");
+	// An applied empty extension split is a legal zero-row scan.
+	auto empty_batch = MakeEmptySplitBatch(planned.splits.front());
+	auto empty_rows = ExecuteAssigned(planned, worker, empty_batch, 400);
+	Check(empty_rows.empty(), "empty Vortex split scanned data");
 
 	// A detached worker plan must fail closed instead of falling back to the
 	// coordinator's complete file set.
 	auto detached = ClonePlan(planned.worker_plan, worker, 500);
 	string detached_error;
-	Check(!distributed::ValidateDistributedScanTasksApplied(*detached, &detached_error),
+	Check(!distributed::ValidateDistributedScanSplitsApplied(*detached, &detached_error),
 	      "unassigned detached Vortex plan validated");
 	auto detached_result =
 	    ExecutePlan(worker, std::move(detached), baseline_types, baseline_names, "test:vortex-distributed-detached");
 	Check(detached_result != nullptr && detached_result->HasError(), "detached Vortex plan executed successfully");
-	Check(StringUtil::Contains(detached_result->GetError(), "explicit task assignment"),
+	Check(StringUtil::Contains(detached_result->GetError(), "explicit split assignment"),
 	      "detached Vortex plan failed for the wrong reason: " + detached_result->GetError());
 
-	const auto &valid_descriptor = planned.descriptors.front();
-	Check(valid_descriptor.extension_tasks.size() == 1, "expected an elementary descriptor for negative tests");
+	const auto &valid_split = planned.splits.front();
+	auto valid_batch = MakeSplitBatch(valid_split);
 
-	auto duplicate = valid_descriptor;
-	duplicate.extension_tasks.push_back(duplicate.extension_tasks.front());
-	RecomputeDescriptorEstimates(duplicate);
+	auto duplicate = valid_batch;
+	duplicate.splits.push_back(duplicate.splits.front());
 	ExpectApplyFailure(planned, worker, duplicate, "appears more than once");
 
-	auto invalid_id = valid_descriptor;
-	invalid_id.extension_tasks[0].task_id = "00";
-	ExpectApplyFailure(planned, worker, invalid_id, "Invalid distributed Vortex task id");
-	auto empty_id = valid_descriptor;
-	empty_id.extension_tasks[0].task_id.clear();
-	ExpectApplyFailure(planned, worker, empty_id, "empty task_id");
+	auto invalid_id = valid_batch;
+	invalid_id.splits[0].split_id = "00";
+	ExpectApplyFailure(planned, worker, invalid_id, "Invalid distributed Vortex split id");
+	auto empty_id = valid_batch;
+	empty_id.splits[0].split_id.clear();
+	ExpectApplyFailure(planned, worker, empty_id, "split_id");
 
-	auto empty_payload = valid_descriptor;
-	empty_payload.extension_tasks[0].payload.clear();
+	auto empty_payload = valid_batch;
+	empty_payload.splits[0].extension_payload.clear();
 	ExpectApplyFailure(planned, worker, empty_payload, "empty payload");
 
-	auto corrupt_payload = valid_descriptor;
-	corrupt_payload.extension_tasks[0].payload[0] = 'X';
+	auto corrupt_payload = valid_batch;
+	corrupt_payload.splits[0].extension_payload[0] = 'X';
 	ExpectApplyFailure(planned, worker, corrupt_payload, "payload magic");
 
-	auto invalid_size = valid_descriptor;
-	Check(invalid_size.extension_tasks[0].payload.size() >= 9, "Vortex task payload is too short for a file size");
-	for (idx_t byte_index = invalid_size.extension_tasks[0].payload.size() - 8;
-	     byte_index < invalid_size.extension_tasks[0].payload.size(); byte_index++) {
-		invalid_size.extension_tasks[0].payload[byte_index] = static_cast<char>(0xff);
+	auto invalid_size = valid_batch;
+	Check(invalid_size.splits[0].extension_payload.size() >= 9, "Vortex split payload is too short for a file size");
+	for (idx_t byte_index = invalid_size.splits[0].extension_payload.size() - 8;
+	     byte_index < invalid_size.splits[0].extension_payload.size(); byte_index++) {
+		invalid_size.splits[0].extension_payload[byte_index] = static_cast<char>(0xff);
 	}
 	ExpectApplyFailure(planned, worker, invalid_size, "invalid file size");
 
-	auto wrong_codec = valid_descriptor;
-	wrong_codec.task_codec.version++;
-	ExpectApplyFailure(planned, worker, wrong_codec, "task codec mismatch");
+	auto wrong_codec = valid_batch;
+	wrong_codec.splits[0].split_codec.version++;
+	ExpectApplyFailure(planned, worker, wrong_codec, "split codec mismatch");
 
-	auto unknown_index = valid_descriptor;
-	unknown_index.extension_tasks[0].task_id = "127";
-	unknown_index.extension_tasks[0].payload[13] = static_cast<char>(127);
+	auto unknown_index = valid_batch;
+	unknown_index.splits[0].split_id = "127";
+	unknown_index.splits[0].extension_payload[13] = static_cast<char>(127);
 	for (idx_t byte_index = 14; byte_index < 21; byte_index++) {
-		unknown_index.extension_tasks[0].payload[byte_index] = 0;
+		unknown_index.splits[0].extension_payload[byte_index] = 0;
 	}
 	ExpectApplyFailure(planned, worker, unknown_index, "unknown file index");
 
-	auto unknown_file = valid_descriptor;
-	auto filename_offset = unknown_file.extension_tasks[0].payload.find(files[0].filename().string());
-	Check(filename_offset != string::npos, "task payload did not contain its bound filename");
-	unknown_file.extension_tasks[0].payload[filename_offset] = 'x';
+	auto unknown_file = valid_batch;
+	auto filename_offset = unknown_file.splits[0].extension_payload.find(files[0].filename().string());
+	Check(filename_offset != string::npos, "split payload did not contain its bound filename");
+	unknown_file.splits[0].extension_payload[filename_offset] = 'x';
 	ExpectApplyFailure(planned, worker, unknown_file, "does not match the bound file identity");
 
-	// Repeat the same descriptor from a fresh detached clone to model a worker
+	// Repeat the same split from a fresh detached clone to model a worker
 	// retry. The assignment remains stable and idempotent.
-	auto first_retry = ExecuteAssigned(planned, worker, valid_descriptor, 600);
-	auto second_retry = ExecuteAssigned(planned, worker, valid_descriptor, 601);
-	Check(first_retry == second_retry, "repeated Vortex task changed meaning");
+	auto first_retry = ExecuteAssigned(planned, worker, valid_batch, 600);
+	auto second_retry = ExecuteAssigned(planned, worker, valid_batch, 601);
+	Check(first_retry == second_retry, "repeated Vortex split changed meaning");
 }
 
 } // namespace

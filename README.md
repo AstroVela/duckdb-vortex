@@ -93,19 +93,19 @@ verifies the statically linked wheel, then runs the Vortex scan and retry tests
 against a local two-node Ray cluster. It does not download or install a Vortex
 extension at worker runtime.
 
-The current elementary task granularity for row-producing scans is one
+The current elementary split granularity for row-producing scans is one
 already-bound Vortex file. If DuckDB pushes a final aggregate completely into
-Vortex, its complete pruned file set is instead kept in one indivisible task;
+Vortex, its complete pruned file set is instead kept in one indivisible split;
 splitting it would produce per-worker final aggregates that cannot be combined
-correctly. A task records the canonical source URL, object path, and byte
-length, and a worker opens only the files assigned to that task. Missing files
+correctly. A split records the canonical source URL, object path, and byte
+length, and a worker opens only the files assigned to that split. Missing files
 and byte-length changes fail closed. The reader API used here does not expose a
 stable fragment, snapshot, or object-version identifier, so a same-path,
 same-size in-place rewrite cannot be detected. Distributed inputs must
 therefore remain immutable or use versioned/content-addressed paths for the
 lifetime of planning and retries, and every worker must be able to access those
 paths with equivalent credentials. Vane builds also disable Vortex late
-materialization because its second scan would otherwise require coupled task
+materialization because its second scan would otherwise require coupled split
 assignment.
 
 ## Running the extension

@@ -356,7 +356,7 @@ pub fn init_global(init_input: &TableInitInput) -> VortexResult<TableFunctionGlo
         projection,
         filter,
         // Vane keeps deferred-reader order stable so file_index filters and
-        // distributed file-task identities never depend on I/O races.
+        // distributed file-split identities never depend on I/O races.
         ordered,
         selection: row_selection,
         row_range,

@@ -63,13 +63,19 @@ struct VortexBindData final : FunctionData {
         }
     };
 
-    void RefreshPortableBind() const;
+    struct PortableSnapshot {
+        string portable_bind;
+        vector<DistributedFile> distributed_files;
+        bool aggregate_scan = false;
+    };
 
-    mutable string portable_bind;
-    mutable vector<DistributedFile> distributed_files;
-    mutable bool aggregate_scan = false;
-    bool explicit_task_mode = false;
-    bool tasks_applied = false;
+    PortableSnapshot CreatePortableSnapshot() const;
+
+    string portable_bind;
+    vector<DistributedFile> distributed_files;
+    bool aggregate_scan = false;
+    bool explicit_split_mode = false;
+    bool splits_applied = false;
     vector<idx_t> eligible_file_indexes;
     vector<idx_t> assigned_file_indexes;
 #endif

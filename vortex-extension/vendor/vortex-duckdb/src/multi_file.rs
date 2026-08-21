@@ -224,7 +224,7 @@ pub fn bind_multi_file_scan(input: &BindInputRef) -> VortexResult<BoundMultiFile
             let (fs, glob) = resolve_filesystem(glob_url)?;
             let mut listings = fs.glob(&glob)?.try_collect::<Vec<_>>().await?;
             // FileSystem::list does not promise an order. Freeze a canonical
-            // order per user-supplied glob so file_index and task_id remain
+            // order per user-supplied glob so file_index and split_id remain
             // stable across independent binds and retries.
             listings.sort();
             files.extend(listings.into_iter().map(|listing| BoundFile {

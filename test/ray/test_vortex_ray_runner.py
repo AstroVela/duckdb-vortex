@@ -23,28 +23,23 @@ def _sql_string(path: Path) -> str:
 
 
 def _collect_tables(runner, relation, schema: pa.Schema) -> pa.Table:
-    parts = list(runner.run_iter_tables(relation))
-    if parts:
-        table = pa.concat_tables(parts)
-        # Vane's low-level Ray iterator intentionally exposes physical result
-        # columns as c0, c1, ... (the same convention used by its own E2E
-        # tests). Verify the physical types before restoring the relation's
-        # logical names so schema comparisons remain meaningful.
-        assert table.num_columns == len(schema)
-        assert table.schema.types == schema.types
-        return table.rename_columns(schema.names).replace_schema_metadata(schema.metadata)
-    return pa.table([pa.array([], type=field.type) for field in schema], schema=schema)
+    assert vane_runners.get_or_create_runner().name == runner.name == "ray"
+    table = relation.to_arrow_table()
+    # The public distributed-result path normalizes Arrow offset widths (for
+    # example large_string to string) and restores the logical column names.
+    assert table.schema == schema
+    return table
 
 
-def _descriptor_blobs(connection, sql: str) -> list[bytes]:
+def _split_batch_blobs(connection, sql: str) -> list[bytes]:
     logical = vane.ray_cxx.PyLogicalPlan.from_duckdb_relation(
         connection.sql(sql),
         f"vortex-ray-plan-{uuid.uuid4()}",
     )
     physical = logical.to_physical_plan(connection)
-    descriptor_map = dict(physical.scan_task_descriptor_map())
-    assert len(descriptor_map) == 1
-    return [bytes(descriptor) for descriptors in descriptor_map.values() for descriptor in descriptors]
+    split_batch_map = dict(physical.scan_split_batch_map())
+    assert len(split_batch_map) == 1
+    return [bytes(batch) for batches in split_batch_map.values() for batch in batches]
 
 
 @pytest.fixture
@@ -53,14 +48,15 @@ def two_node_ray_runner(monkeypatch, tmp_path):
         ray.shutdown()
 
     package_parent = str(Path(vane.__file__).resolve().parent.parent)
-    pythonpath = os.pathsep.join(dict.fromkeys([package_parent, os.environ.get("PYTHONPATH", "")])).strip(os.pathsep)
+    pythonpath = os.pathsep.join(
+        dict.fromkeys([package_parent, os.environ.get("PYTHONPATH", "")])
+    ).strip(os.pathsep)
     env_vars = {
         "PYTHONPATH": pythonpath,
         "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
         "RAY_DEDUP_LOGS": "0",
         "VANE_FTE_DYNAMIC_SCAN_MAX_SPLITS_PER_PARTITION": "1",
-        "VANE_RAY_SCAN_TASK_MIN_PARTITION_NUM": "4",
-        "VANE_RAY_SCAN_TASK_SIZE_GROUPING": "0",
+        "VANE_RAY_SCAN_SPLIT_MIN_COUNT": "4",
         "VANE_SHUFFLE_ALGORITHM": "flight_shuffle",
         "VANE_SHUFFLE_LOCAL_DIRS": str(tmp_path / "shuffle"),
     }
@@ -103,7 +99,9 @@ def two_node_ray_runner(monkeypatch, tmp_path):
                 cluster.shutdown()
 
 
-def test_vortex_explicit_scan_runs_on_multiple_ray_workers(two_node_ray_runner, tmp_path):
+def test_vortex_explicit_scan_runs_on_multiple_ray_workers(
+    two_node_ray_runner, tmp_path
+):
     connection = vane.connect()
     try:
         rows_per_file = 1_000
@@ -131,11 +129,13 @@ def test_vortex_explicit_scan_runs_on_multiple_ray_workers(two_node_ray_runner, 
         assert expected.column("id").to_pylist()[0] == 750
         assert expected.column("id").to_pylist()[-1] == 3_249
 
-        descriptors = _descriptor_blobs(connection, scan_sql)
-        assert len(descriptors) == len(files)
-        assert len(set(descriptors)) == len(files)
+        split_batches = _split_batch_blobs(connection, scan_sql)
+        assert len(split_batches) == len(files)
+        assert len(set(split_batches)) == len(files)
 
-        actual = _collect_tables(two_node_ray_runner, connection.sql(scan_sql), expected.schema).sort_by("id")
+        actual = _collect_tables(
+            two_node_ray_runner, connection.sql(scan_sql), expected.schema
+        ).sort_by("id")
         assert actual.schema == expected.schema
         assert actual.equals(expected)
 
@@ -149,7 +149,7 @@ def test_vortex_explicit_scan_runs_on_multiple_ray_workers(two_node_ray_runner, 
         }
         # Vane creates one persistent worker actor per node. A fragment lookup
         # happens only when that actor executes an FTE task, so this proves the
-        # four distinct file descriptors were not all consumed by one worker.
+        # four distinct file splits were not all consumed by one worker.
         assert len(scan_workers) >= 2, fragment_stats
         scan_node_ids = {worker_id.rsplit(":", 2)[-2] for worker_id in scan_workers}
         assert len(scan_node_ids) >= 2, fragment_stats
@@ -163,7 +163,7 @@ def test_vortex_explicit_scan_runs_on_multiple_ray_workers(two_node_ray_runner, 
         """
         pruned_expected = connection.execute(pruned_sql).to_arrow_table().sort_by("id")
         assert pruned_expected.num_rows == 100
-        assert len(_descriptor_blobs(connection, pruned_sql)) == 1
+        assert len(_split_batch_blobs(connection, pruned_sql)) == 1
         pruned_actual = _collect_tables(
             two_node_ray_runner,
             connection.sql(pruned_sql),
@@ -179,7 +179,9 @@ def test_vortex_explicit_scan_runs_on_multiple_ray_workers(two_node_ray_runner, 
             FROM read_vortex({source})
             WHERE payload LIKE '%25%'
         """
-        expression_expected = connection.execute(expression_sql).to_arrow_table().sort_by("id")
+        expression_expected = (
+            connection.execute(expression_sql).to_arrow_table().sort_by("id")
+        )
         assert expression_expected.num_rows > 0
         expression_actual = _collect_tables(
             two_node_ray_runner,
@@ -193,9 +195,11 @@ def test_vortex_explicit_scan_runs_on_multiple_ray_workers(two_node_ray_runner, 
             FROM read_vortex({source})
             WHERE file_index != 1
         """
-        not_equal_expected = connection.execute(not_equal_sql).to_arrow_table().sort_by("id")
+        not_equal_expected = (
+            connection.execute(not_equal_sql).to_arrow_table().sort_by("id")
+        )
         assert not_equal_expected.num_rows == rows_per_file * 3
-        assert len(_descriptor_blobs(connection, not_equal_sql)) == 3
+        assert len(_split_batch_blobs(connection, not_equal_sql)) == 3
         not_equal_actual = _collect_tables(
             two_node_ray_runner,
             connection.sql(not_equal_sql),
@@ -211,7 +215,9 @@ def test_vortex_explicit_scan_runs_on_multiple_ray_workers(two_node_ray_runner, 
             FROM read_vortex({source})
             WHERE file_row_number != 0
         """
-        row_number_expected = connection.execute(row_number_sql).to_arrow_table().sort_by("id")
+        row_number_expected = (
+            connection.execute(row_number_sql).to_arrow_table().sort_by("id")
+        )
         assert row_number_expected.num_rows == (rows_per_file - 1) * len(files)
         row_number_actual = _collect_tables(
             two_node_ray_runner,
@@ -220,30 +226,32 @@ def test_vortex_explicit_scan_runs_on_multiple_ray_workers(two_node_ray_runner, 
         ).sort_by("id")
         assert row_number_actual.equals(row_number_expected)
 
-        empty_task_sql = f"""
+        empty_split_sql = f"""
             SELECT id, file_index
             FROM read_vortex({source})
             WHERE file_index = 99
         """
-        empty_task_expected = connection.execute(empty_task_sql).to_arrow_table()
-        assert empty_task_expected.num_rows == 0
-        # Vane transports a single legal descriptor whose extension task array
-        # is empty after coordinator file-index pruning.
-        assert len(_descriptor_blobs(connection, empty_task_sql)) == 1
-        empty_task_actual = _collect_tables(
+        empty_split_expected = connection.execute(empty_split_sql).to_arrow_table()
+        assert empty_split_expected.num_rows == 0
+        # Vane transports one legal explicit empty split after coordinator
+        # file-index pruning.
+        assert len(_split_batch_blobs(connection, empty_split_sql)) == 1
+        empty_split_actual = _collect_tables(
             two_node_ray_runner,
-            connection.sql(empty_task_sql),
-            empty_task_expected.schema,
+            connection.sql(empty_split_sql),
+            empty_split_expected.schema,
         )
-        assert empty_task_actual.schema == empty_task_expected.schema
-        assert empty_task_actual.num_rows == 0
+        assert empty_split_actual.schema == empty_split_expected.schema
+        assert empty_split_actual.num_rows == 0
 
         empty_aggregate_sql = f"""
             SELECT min(id) AS min_id, max(id) AS max_id, count(id) AS id_count
             FROM read_vortex({source})
             WHERE file_index = 99
         """
-        empty_aggregate_expected = connection.execute(empty_aggregate_sql).to_arrow_table()
+        empty_aggregate_expected = connection.execute(
+            empty_aggregate_sql
+        ).to_arrow_table()
         assert empty_aggregate_expected.num_rows == 1
         assert empty_aggregate_expected.column("min_id").null_count == 1
         assert empty_aggregate_expected.column("max_id").null_count == 1
@@ -256,7 +264,7 @@ def test_vortex_explicit_scan_runs_on_multiple_ray_workers(two_node_ray_runner, 
         assert empty_aggregate_actual.equals(empty_aggregate_expected)
 
         aggregate_sql = f"""
-            SELECT count(*) AS row_count, sum(id) AS id_sum,
+            SELECT count(*) AS row_count, CAST(sum(id) AS BIGINT) AS id_sum,
                    min(id) AS min_id, max(grp) AS max_grp
             FROM read_vortex({source})
             WHERE id >= {rows_per_file * 3 // 4}
@@ -277,7 +285,9 @@ def test_vortex_explicit_scan_runs_on_multiple_ray_workers(two_node_ray_runner, 
             SELECT min(id) AS min_id, max(id) AS max_id, count(id) AS id_count
             FROM read_vortex({source})
         """
-        pushed_aggregate_expected = connection.execute(pushed_aggregate_sql).to_arrow_table()
+        pushed_aggregate_expected = connection.execute(
+            pushed_aggregate_sql
+        ).to_arrow_table()
         pushed_aggregate_actual = _collect_tables(
             two_node_ray_runner,
             connection.sql(pushed_aggregate_sql),
@@ -286,9 +296,9 @@ def test_vortex_explicit_scan_runs_on_multiple_ray_workers(two_node_ray_runner, 
         assert pushed_aggregate_actual.schema == pushed_aggregate_expected.schema
         assert pushed_aggregate_actual.equals(pushed_aggregate_expected)
 
-        # Vane assigns explicit tasks independently per physical scan. The
+        # Vane assigns explicit splits independently per physical scan. The
         # distributed-capable Vortex function therefore disables DuckDB's
-        # two-scan late-materialization rewrite until grouped multi-scan task
+        # two-scan late-materialization rewrite until grouped multi-scan split
         # assignments exist; otherwise the row-id semi-join can see disjoint
         # files and silently return no rows.
         late_materialization_sql = f"""
@@ -297,10 +307,14 @@ def test_vortex_explicit_scan_runs_on_multiple_ray_workers(two_node_ray_runner, 
             ORDER BY grp DESC, id DESC
             LIMIT 7
         """
-        explain_rows = connection.execute(f"EXPLAIN {late_materialization_sql}").fetchall()
+        explain_rows = connection.execute(
+            f"EXPLAIN {late_materialization_sql}"
+        ).fetchall()
         explain_text = "\n".join(str(value) for row in explain_rows for value in row)
         assert explain_text.count("READ_VORTEX") == 1, explain_text
-        late_materialization_expected = connection.execute(late_materialization_sql).to_arrow_table().sort_by("id")
+        late_materialization_expected = (
+            connection.execute(late_materialization_sql).to_arrow_table().sort_by("id")
+        )
         late_materialization_actual = _collect_tables(
             two_node_ray_runner,
             connection.sql(late_materialization_sql),
@@ -318,7 +332,9 @@ def test_vortex_explicit_scan_runs_on_multiple_ray_workers(two_node_ray_runner, 
             ORDER BY grp ASC, id ASC
             LIMIT 7
         """
-        filtered_topn_expected = connection.execute(filtered_topn_sql).to_arrow_table().sort_by("id")
+        filtered_topn_expected = (
+            connection.execute(filtered_topn_sql).to_arrow_table().sort_by("id")
+        )
         assert filtered_topn_expected.column("grp").to_pylist() == [2] * 7
         filtered_topn_actual = _collect_tables(
             two_node_ray_runner,
@@ -327,7 +343,9 @@ def test_vortex_explicit_scan_runs_on_multiple_ray_workers(two_node_ray_runner, 
         ).sort_by("id")
         assert filtered_topn_actual.equals(filtered_topn_expected)
 
-        repeated = _collect_tables(two_node_ray_runner, connection.sql(scan_sql), expected.schema).sort_by("id")
+        repeated = _collect_tables(
+            two_node_ray_runner, connection.sql(scan_sql), expected.schema
+        ).sort_by("id")
         assert repeated.equals(expected)
 
         empty_file = tmp_path / "empty.vortex"
@@ -340,7 +358,7 @@ def test_vortex_explicit_scan_runs_on_multiple_ray_workers(two_node_ray_runner, 
         empty_sql = f"SELECT id FROM read_vortex({_sql_string(empty_file)})"
         empty_expected = connection.execute(empty_sql).to_arrow_table()
         assert empty_expected.num_rows == 0
-        assert len(_descriptor_blobs(connection, empty_sql)) == 1
+        assert len(_split_batch_blobs(connection, empty_sql)) == 1
         empty_actual = _collect_tables(
             two_node_ray_runner,
             connection.sql(empty_sql),

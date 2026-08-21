@@ -114,7 +114,7 @@ typedef enum DUCKDB_VX_TABLE_FILTER_MATCH {
 } duckdb_vx_table_filter_match;
 
 /// Evaluate a table filter against one non-null UBIGINT value. A null client
-/// context is valid during distributed task planning; expression filters that
+/// context is valid during distributed split planning; expression filters that
 /// require execution then return UNKNOWN so planning remains conservative.
 duckdb_vx_table_filter_match duckdb_vx_table_filter_matches_ubigint(duckdb_vx_table_filter ffi_filter,
                                                                     duckdb_client_context client_context,

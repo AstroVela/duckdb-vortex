@@ -17,7 +17,8 @@ import ray
 import vane
 
 ROOT = Path(__file__).resolve().parents[2]
-VANE_TESTS = ROOT / "vane" / "tests"
+VANE_ROOT = ROOT / "vane"
+VANE_TESTS = VANE_ROOT / "tests"
 
 # Reuse Vane's production-actor fault harness. It owns the retry scheduler,
 # worker replacement, and dynamic split replay mechanics that this extension
@@ -26,6 +27,7 @@ VANE_TESTS = ROOT / "vane" / "tests"
 # shadow PyArrow's optional pandas dependency during the Vortex result tests.
 _original_sys_path = list(sys.path)
 try:
+    sys.path.insert(0, str(VANE_ROOT))
     sys.path.insert(0, str(VANE_TESTS))
     sys.path.insert(0, str(VANE_TESTS / "fast"))
     fault = importlib.import_module("test_ray_fte_fault_injection")
@@ -81,7 +83,7 @@ class _CapturingWorker:
         return None
 
 
-def _extract_worker_scan_task(monkeypatch, connection, coordinator_plan):
+def _extract_worker_scan_split_batch(monkeypatch, connection, coordinator_plan):
     """Capture the detached scan plan that the production translator submits."""
     import vane.runners.ray.worker_handle as ray_worker_handle
 
@@ -112,19 +114,20 @@ def _extract_worker_scan_task(monkeypatch, connection, coordinator_plan):
             node_id="capture-node",
         ):
             stream = runner.run_plan(coordinator_plan, connection)
-            with pytest.raises(StopIteration):
-                stream.blocking_next()
+            assert result_contract.collect_result_stream(stream) == []
 
-    scan_tasks = []
+    scan_split_batches = []
     for task in worker.tasks:
         for node_id, entry in task.Inputs().items():
-            if entry["kind"] == "scan_task":
-                scan_tasks.append((task.plan(), str(node_id), bytes(entry["data"])))
-    assert len(scan_tasks) == 1
-    return scan_tasks[0]
+            if entry["kind"] == "scan_split_batch":
+                scan_split_batches.append(
+                    (task.plan(), str(node_id), bytes(entry["data"]))
+                )
+    assert len(scan_split_batches) == 1
+    return scan_split_batches[0]
 
 
-def test_vortex_descriptor_replays_after_real_ray_worker_loss(monkeypatch, tmp_path):
+def test_vortex_split_replays_after_real_ray_worker_loss(monkeypatch, tmp_path):
     monkeypatch.setenv("VANE_FTE_STATUS_WAIT_TIMEOUT_S", "5")
     monkeypatch.setenv("VANE_FTE_CONTROL_RPC_INITIAL_BACKOFF_S", "0")
     monkeypatch.setenv("VANE_FTE_SPLIT_QUEUE_SPACE_WAIT_TIMEOUT_S", "0.1")
@@ -141,29 +144,35 @@ def test_vortex_descriptor_replays_after_real_ray_worker_loss(monkeypatch, tmp_p
                 FROM range(10)
             ) TO {_sql_string(path)} (FORMAT VORTEX)
             """)
-        relation = connection.sql(f"SELECT sum(id) AS total FROM read_vortex({_sql_string(path)})")
+        relation = connection.sql(
+            f"SELECT sum(id) AS total FROM read_vortex({_sql_string(path)})"
+        )
         plan = vane.ray_cxx.PyLogicalPlan.from_duckdb_relation(
             relation,
             f"vortex-retry-plan-{uuid.uuid4()}",
         ).to_physical_plan(connection)
-        descriptor_map = dict(plan.scan_task_descriptor_map())
-        assert len(descriptor_map) == 1
-        coordinator_node_id, descriptors = next(iter(descriptor_map.items()))
-        assert len(descriptors) == 1
-        coordinator_descriptor = bytes(descriptors[0])
+        split_batch_map = dict(plan.scan_split_batch_map())
+        assert len(split_batch_map) == 1
+        coordinator_node_id, split_batches = next(iter(split_batch_map.items()))
+        assert len(split_batches) == 1
+        coordinator_split_batch = bytes(split_batches[0])
 
-        worker_plan, node_id, descriptor = _extract_worker_scan_task(
+        worker_plan, node_id, split_batch = _extract_worker_scan_split_batch(
             monkeypatch,
             connection,
             plan,
         )
         assert node_id == str(coordinator_node_id)
-        assert descriptor == coordinator_descriptor
+        assert split_batch == coordinator_split_batch
         fault._clear_fte_state()
         fault._init_ray_for_fault_test(monkeypatch)
 
-        actor0 = fault.worker_mod.RayWorkerActor.options(num_cpus=0).remote(1, 0, 1 << 30, 1 << 60)
-        actor1 = fault.worker_mod.RayWorkerActor.options(num_cpus=0).remote(1, 0, 1 << 30, 1 << 60)
+        actor0 = fault.worker_mod.RayWorkerActor.options(num_cpus=0).remote(
+            1, 0, 1 << 30, 1 << 60
+        )
+        actor1 = fault.worker_mod.RayWorkerActor.options(num_cpus=0).remote(
+            1, 0, 1 << 30, 1 << 60
+        )
         handle0 = fault.RayWorkerActorHandle(
             actor0,
             memory_capacity_bytes=1 << 60,
@@ -176,46 +185,58 @@ def test_vortex_descriptor_replays_after_real_ray_worker_loss(monkeypatch, tmp_p
         )
 
         query_id = str(worker_plan.idx())
-        task = fault._NativeDynamicScanTask(
+        task = fault._NativeDynamicScanWorkerTask(
             query_id=query_id,
             node_id=str(node_id),
-            descriptor=descriptor,
+            split_batch=split_batch,
             plan=worker_plan,
         )
         fault._register_fault_query([task])
         first_handle = handle0.submit_tasks([task])[0]
         assert str(first_handle.task_id) == f"{query_id}.0.0.0"
-        assert [str(handle.task_id) for handle in handle0.pop_fte_result_handles(query_id)] == [f"{query_id}.0.0.0"]
+        assert [
+            str(handle.task_id) for handle in handle0.pop_fte_result_handles(query_id)
+        ] == [f"{query_id}.0.0.0"]
         first_handle.done()
 
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
-            info = ray.get(actor0.fte_get_task_info.remote(first_handle.task_id.to_dict()))
+            info = ray.get(
+                actor0.fte_get_task_info.remote(first_handle.task_id.to_dict())
+            )
             status = info["status"]
-            if status.get("state") == "RUNNING" and int(status.get("queued_split_count", 0)) == 0:
+            if (
+                status.get("state") == "RUNNING"
+                and int(status.get("queued_split_count", 0)) == 0
+            ):
                 break
             time.sleep(0.05)
         else:
-            raise AssertionError("Vortex scan did not enter the retryable RUNNING state")
+            raise AssertionError(
+                "Vortex scan did not enter the retryable RUNNING state"
+            )
 
         ray.kill(actor0, no_restart=True)
         with pytest.raises(ray.exceptions.RayError):
             asyncio.run(asyncio.wait_for(first_handle.get_result(), timeout=10.0))
 
-        retry_handle = fault._wait_for_result_handles(
-            handle1,
-            query_id,
-            1,
-        )[0]
+        handle0.wait_fte_worker_failure_reconciliation(timeout_s=10.0)
+        retry_handles = handle1.pop_fte_result_handles(query_id)
+        assert len(retry_handles) == 1
+        retry_handle = retry_handles[0]
         assert str(retry_handle.task_id) == f"{query_id}.0.0.1"
-        retry_info = ray.get(actor1.fte_get_task_info.remote(retry_handle.task_id.to_dict()))
+        retry_info = ray.get(
+            actor1.fte_get_task_info.remote(retry_handle.task_id.to_dict())
+        )
         if retry_info["status"].get("state") == "RUNNING":
             handle1.task_input_stream_exhausted([str(node_id)])
         result = asyncio.run(asyncio.wait_for(retry_handle.get_result(), timeout=20.0))
 
         assert result.ok
         assert result.has_output
-        final_info = ray.get(actor1.fte_get_task_info.remote(retry_handle.task_id.to_dict()))
+        final_info = ray.get(
+            actor1.fte_get_task_info.remote(retry_handle.task_id.to_dict())
+        )
         raw_result = final_info["result"]
         if isinstance(raw_result, dict):
             raw_result = raw_result["result"]
