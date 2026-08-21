@@ -6,7 +6,8 @@ if(NOT EXISTS "${DUCKDB_MODULE_BASE_DIR}/src/include/duckdb/function/distributed
     )
 endif()
 
-set(VORTEX_ENABLE_VANE ON)
+set(VORTEX_ENABLE_VANE ON CACHE BOOL
+    "Enable Vane-only registration and explicit distributed scans" FORCE)
 include(${CMAKE_CURRENT_LIST_DIR}/extension_config.cmake)
 
 # Vane processes custom extension configs after BUILD_EXTENSIONS. Add the

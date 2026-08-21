@@ -3,7 +3,6 @@ PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 EXT_NAME=vortex_duckdb
 EXT_CONFIG=${PROJ_DIR}extension_config.cmake
 EXT_FLAGS ?=-DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
-VANE_SOURCE_DIR ?= $(PROJ_DIR)vane
 export MACOSX_DEPLOYMENT_TARGET=12.0
 export VCPKG_FEATURE_FLAGS=-binarycaching
 export VCPKG_OSX_DEPLOYMENT_TARGET=12.0
@@ -22,8 +21,10 @@ VANE_EXTENSION_CI_MAKEFILE := $(PROJ_DIR)vane-extension-ci-tools/makefiles/vane_
 ifneq ($(wildcard $(VANE_EXTENSION_CI_MAKEFILE)),)
 include $(VANE_EXTENSION_CI_MAKEFILE)
 else
-.PHONY: vane_validate vane_prepare vane_identity vane_native vane_ci
-vane_validate vane_prepare vane_identity vane_native vane_ci:
+.PHONY: vane_verify_ci_tools vane_validate vane_prepare vane_identity vane_native vane_ci \
+	vane_wheel_dependencies vane_wheel
+vane_verify_ci_tools vane_validate vane_prepare vane_identity vane_native vane_ci \
+	vane_wheel_dependencies vane_wheel:
 	@echo "vane-extension-ci-tools is not initialized; run: git submodule update --init vane-extension-ci-tools" >&2
 	@exit 1
 endif

@@ -67,15 +67,31 @@ make vane_ci \
   VCPKG_TOOLCHAIN_PATH="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake"
 ```
 
-`vane-extension.toml` pins the exact Vane revision used by this lane. The
-local target uses the checked-out `vane/` submodule and therefore compiles
-against `vane/external/duckdb`; CI checks out the same pinned revision. The
-Vane lane uses the additive `vane_extension_config.cmake`; the existing
+On Linux x86-64, the same exact pins can produce and verify a Vane wheel with
+Vortex statically linked:
+
+```sh
+make vane_wheel \
+  VCPKG_TOOLCHAIN_PATH="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake"
+```
+
+`vane-extension.toml` pins the exact Vane revision used by this lane. Local
+targets prepare a clean checkout under `build/vane-source`; the reusable CI
+workflow checks out the same revision in its isolated workspace. Both compile
+against that checkout's `external/duckdb` and never use the ordinary `duckdb/`
+submodule. The checked-in `vane/` gitlink is pinned to the same revision for
+direct development and test support, but is not silently trusted as the CI
+source.
+
+The Vane lane uses the additive `vane_extension_config.cmake`; the existing
 `extension_config.cmake` remains the configuration for ordinary DuckDB. The
 Vane-specific table-function registration and distributed scan callbacks are
 enabled only by that additive config after it verifies Vane's distributed
 table-function header; ordinary DuckDB builds retain the existing C API
-registration path.
+registration path. The Vane CI workflow validates the native lane, builds and
+verifies the statically linked wheel, then runs the Vortex scan and retry tests
+against a local two-node Ray cluster. It does not download or install a Vortex
+extension at worker runtime.
 
 The current elementary task granularity for row-producing scans is one
 already-bound Vortex file. If DuckDB pushes a final aggregate completely into
