@@ -110,8 +110,7 @@ def test_vortex_explicit_scan_runs_on_multiple_ray_workers(two_node_ray_runner, 
         files = [tmp_path / f"part-{file_index}.vortex" for file_index in range(4)]
         for file_index, path in enumerate(files):
             start = file_index * rows_per_file
-            connection.execute(
-                f"""
+            connection.execute(f"""
                 COPY (
                     SELECT
                         ({start} + range)::BIGINT AS id,
@@ -119,8 +118,7 @@ def test_vortex_explicit_scan_runs_on_multiple_ray_workers(two_node_ray_runner, 
                         'row-' || ({start} + range)::VARCHAR AS payload
                     FROM range({rows_per_file})
                 ) TO {_sql_string(path)} (FORMAT VORTEX)
-                """
-            )
+                """)
 
         source = "[" + ", ".join(_sql_string(path) for path in files) + "]"
         scan_sql = f"""
@@ -333,14 +331,12 @@ def test_vortex_explicit_scan_runs_on_multiple_ray_workers(two_node_ray_runner, 
         assert repeated.equals(expected)
 
         empty_file = tmp_path / "empty.vortex"
-        connection.execute(
-            f"""
+        connection.execute(f"""
             COPY (
                 SELECT range::BIGINT AS id, ''::VARCHAR AS payload
                 FROM range(0)
             ) TO {_sql_string(empty_file)} (FORMAT VORTEX)
-            """
-        )
+            """)
         empty_sql = f"SELECT id FROM read_vortex({_sql_string(empty_file)})"
         empty_expected = connection.execute(empty_sql).to_arrow_table()
         assert empty_expected.num_rows == 0

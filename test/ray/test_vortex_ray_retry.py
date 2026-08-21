@@ -129,14 +129,12 @@ def test_vortex_descriptor_replays_after_real_ray_worker_loss(monkeypatch, tmp_p
     actor1 = None
     try:
         path = tmp_path / "retry.vortex"
-        connection.execute(
-            f"""
+        connection.execute(f"""
             COPY (
                 SELECT range::BIGINT AS id, 'row-' || range::VARCHAR AS payload
                 FROM range(10)
             ) TO {_sql_string(path)} (FORMAT VORTEX)
-            """
-        )
+            """)
         relation = connection.sql(f"SELECT sum(id) AS total FROM read_vortex({_sql_string(path)})")
         plan = vane.ray_cxx.PyLogicalPlan.from_duckdb_relation(
             relation,
