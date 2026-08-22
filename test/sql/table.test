@@ -49,5 +49,7 @@ SELECT
     CAST(md5(CAST(seq AS VARCHAR)) AS BLOB) AS blob_col,
 FROM generate_series(1, 100) AS t(seq);
 
-statement ok
-COPY generated_data_table TO '__TEST_DIR__/table_test.vortex' (FORMAT VORTEX);
+query IIIIII
+COPY generated_data_table TO '__TEST_DIR__/table_test.vortex' (FORMAT VORTEX, RETURN_STATS true);
+----
+<REGEX>:.*table_test.vortex	100	<REGEX>:[1-9][0-9]*	NULL	{}	NULL

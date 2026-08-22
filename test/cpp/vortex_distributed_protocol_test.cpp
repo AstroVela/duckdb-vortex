@@ -3,11 +3,17 @@
 
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/value.hpp"
 #include "duckdb/execution/distributed/pipeline_node/pipeline_node.hpp"
+#include "duckdb/execution/distributed/pipeline_node/copy_finish.hpp"
+#include "duckdb/execution/distributed/pipeline_node/translator.hpp"
 #include "duckdb/execution/distributed/pipeline_node/translator_scan.hpp"
 #include "duckdb/execution/distributed/plan/scan_split.hpp"
+#include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
+#include "duckdb/function/copy_function.hpp"
+#include "duckdb/function/distributed_table_function.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/materialized_query_result.hpp"
@@ -209,6 +215,19 @@ unique_ptr<PhysicalPlan> CloneNativePlan(const distributed::DuckPhysicalPlanRef 
 	return plan;
 }
 
+unique_ptr<PhysicalPlan> CloneNativePlanWithTransientContext(const distributed::DuckPhysicalPlanRef &source) {
+	DuckDB clone_database(nullptr);
+	Connection clone_connection(clone_database);
+	return CloneNativePlan(source, clone_connection);
+}
+
+unique_ptr<PhysicalPlan> ClonePlanWithTransientContext(const distributed::DuckPhysicalPlanRef &source,
+                                                       idx_t scan_node_id) {
+	DuckDB clone_database(nullptr);
+	Connection clone_connection(clone_database);
+	return ClonePlan(source, clone_connection, scan_node_id);
+}
+
 void ApplySplitBatch(PhysicalPlan &plan, idx_t scan_node_id, const distributed::ScanSplitBatch &batch) {
 	unordered_map<idx_t, distributed::ScanSplitBatch> assignments;
 	assignments.emplace(scan_node_id, batch);
@@ -220,8 +239,9 @@ void ApplySplitBatch(PhysicalPlan &plan, idx_t scan_node_id, const distributed::
 }
 
 unique_ptr<QueryResult> ExecutePlan(Connection &worker, unique_ptr<PhysicalPlan> plan, const vector<LogicalType> &types,
-                                    const vector<string> &names, const string &label) {
-	auto prepared = make_shared_ptr<PreparedStatementData>(StatementType::SELECT_STATEMENT);
+                                    const vector<string> &names, const string &label,
+                                    StatementType statement_type = StatementType::SELECT_STATEMENT) {
+	auto prepared = make_shared_ptr<PreparedStatementData>(statement_type);
 	prepared->names = names;
 	prepared->types = types;
 	prepared->properties.return_type = StatementReturnType::QUERY_RESULT;
@@ -235,6 +255,109 @@ unique_ptr<QueryResult> ExecutePlan(Connection &worker, unique_ptr<PhysicalPlan>
 		throw std::runtime_error("worker rejected physical plan: " + pending->GetError());
 	}
 	return pending->Execute();
+}
+
+void CheckCopyStatistics(QueryResult &result, const std::filesystem::path &path, idx_t expected_rows) {
+	if (result.HasError()) {
+		throw std::runtime_error("Vortex COPY statistics query failed: " + result.GetError());
+	}
+	auto *materialized = dynamic_cast<MaterializedQueryResult *>(&result);
+	Check(materialized != nullptr, "expected materialized Vortex COPY statistics");
+	Check(materialized->ColumnCount() == 6 && materialized->RowCount() == 1,
+	      "Vortex COPY did not return one written-file statistics row");
+	Check(materialized->GetValue(0, 0).GetValue<string>() == path.string(),
+	      "Vortex COPY statistics returned the wrong file path");
+	Check(materialized->GetValue(1, 0).GetValue<uint64_t>() == expected_rows,
+	      "Vortex COPY statistics returned the wrong row count");
+	auto reported_size = materialized->GetValue(2, 0).GetValue<uint64_t>();
+	Check(reported_size > 0, "Vortex COPY statistics returned an empty file size");
+	Check(reported_size == std::filesystem::file_size(path),
+	      "Vortex COPY statistics file size does not match the written artifact");
+	Check(materialized->GetValue(3, 0).IsNull(), "Vortex COPY unexpectedly reported a footer size");
+	auto column_statistics = materialized->GetValue(4, 0);
+	Check(!column_statistics.IsNull() && MapValue::GetChildren(column_statistics).empty(),
+	      "Vortex COPY unexpectedly reported column statistics");
+	Check(materialized->GetValue(5, 0).IsNull(), "Vortex COPY unexpectedly reported partition keys");
+}
+
+void TestWriteProtocol() {
+	auto temp = MakeTempDirectory();
+	auto output = temp.path / "roundtrip.vortex";
+
+	DuckDB coordinator_database(nullptr);
+	Connection coordinator(coordinator_database);
+	auto copy_sql = "COPY (SELECT CAST(range AS BIGINT) AS id, 'row-' || CAST(range AS VARCHAR) AS payload "
+	                "FROM range(37)) TO " +
+	                SQLString(output) + " (FORMAT VORTEX, RETURN_STATS true)";
+	auto coordinator_plan = ExtractPhysicalPlan(coordinator, copy_sql);
+	Check(coordinator_plan->Root().type == PhysicalOperatorType::COPY_TO_FILE,
+	      "Vortex write did not plan a COPY_TO_FILE root");
+	auto &copy_root = coordinator_plan->Root().Cast<PhysicalCopyToFile>();
+	Check(copy_root.function.name == "vortex", "Vortex write planned the wrong COPY function");
+	Check(copy_root.function.serialize && copy_root.function.deserialize, "Vortex COPY bind serde is not registered");
+	Check(copy_root.function.copy_to_get_written_statistics,
+	      "Vortex COPY written-file statistics callback is not registered");
+	Check(copy_root.return_type == CopyFunctionReturnType::WRITTEN_FILE_STATISTICS,
+	      "Vortex COPY RETURN_STATS did not reach the physical plan");
+	Check(copy_root.bind_data != nullptr, "Vortex COPY physical bind is missing");
+	auto copied_bind = copy_root.bind_data->Copy();
+	Check(copied_bind != nullptr, "Vortex COPY bind clone returned null");
+
+	distributed::PlanConfig config;
+	config.db = coordinator_database.instance;
+	config.config =
+	    std::make_shared<distributed::DuckDBExecutionConfig>(distributed::DuckDBExecutionConfig::from_env());
+	{
+		auto translated =
+		    distributed::physical_plan_to_pipeline_node(config, coordinator_plan, coordinator.context.get());
+		if (translated.is_err()) {
+			throw std::runtime_error(std::string("Vortex distributed COPY translation failed: ") +
+			                         translated.error().what());
+		}
+		auto copy_finish = std::dynamic_pointer_cast<distributed::CopyFinishNode>(translated.value()->inner());
+		Check(copy_finish != nullptr, "Vortex distributed COPY did not translate to CopyFinish");
+		auto translated_spec = copy_finish->copy_sink()->spec().Clone();
+		Check(translated_spec.bind_data != nullptr, "Vortex distributed COPY spec bind clone returned null");
+	}
+
+	DuckDB worker_database(nullptr);
+	Connection worker(worker_database);
+	// Clone through a connection that is destroyed before execution. Vortex's
+	// deserialized COPY bind must contain only owned schema data, never a
+	// ClientContext or connection-scoped runtime reference.
+	auto worker_plan = CloneNativePlanWithTransientContext(coordinator_plan);
+	coordinator_plan.reset();
+
+	auto result_types = GetCopyFunctionReturnLogicalTypes(CopyFunctionReturnType::WRITTEN_FILE_STATISTICS);
+	auto result_names = GetCopyFunctionReturnNames(CopyFunctionReturnType::WRITTEN_FILE_STATISTICS);
+	auto result = ExecutePlan(worker, std::move(worker_plan), result_types, result_names,
+	                          "test:vortex-distributed-copy-roundtrip", StatementType::COPY_STATEMENT);
+	Check(result != nullptr, "Vortex COPY worker returned no result");
+	CheckCopyStatistics(*result, output, 37);
+
+	auto read_result = worker.Query("SELECT count(*), sum(id), min(payload), max(payload) FROM read_vortex(" +
+	                                SQLString(output) + ")");
+	Check(read_result != nullptr && !read_result->HasError() && read_result->RowCount() == 1,
+	      "Vortex COPY worker artifact could not be read");
+	Check(read_result->GetValue(0, 0).GetValue<int64_t>() == 37 &&
+	          read_result->GetValue(1, 0).GetValue<int64_t>() == 666 &&
+	          read_result->GetValue(2, 0).GetValue<string>() == "row-0" &&
+	          read_result->GetValue(3, 0).GetValue<string>() == "row-9",
+	      "Vortex COPY worker artifact contents differ from the source relation");
+
+	auto empty_output = temp.path / "empty.vortex";
+	auto empty_plan =
+	    ExtractPhysicalPlan(coordinator, "COPY (SELECT CAST(range AS BIGINT) AS id FROM range(0)) TO " +
+	                                         SQLString(empty_output) + " (FORMAT VORTEX, RETURN_STATS true)");
+	auto empty_worker_plan = CloneNativePlanWithTransientContext(empty_plan);
+	empty_plan.reset();
+	auto empty_result = ExecutePlan(worker, std::move(empty_worker_plan), result_types, result_names,
+	                                "test:vortex-distributed-copy-empty", StatementType::COPY_STATEMENT);
+	Check(empty_result != nullptr, "empty Vortex COPY worker returned no result");
+	CheckCopyStatistics(*empty_result, empty_output, 0);
+	auto empty_read = worker.Query("SELECT count(*) FROM read_vortex(" + SQLString(empty_output) + ")");
+	Check(empty_read != nullptr && !empty_read->HasError() && empty_read->GetValue(0, 0).GetValue<int64_t>() == 0,
+	      "empty Vortex COPY artifact did not round-trip as zero rows");
 }
 
 vector<ResultRow> ExecuteAssigned(const PlannedScan &planned, Connection &worker,
@@ -289,13 +412,18 @@ void ExpectApplyFailure(const PlannedScan &planned, Connection &worker, const di
 }
 
 void ValidateSplitContract(const vector<distributed::ScanSplit> &splits, idx_t expected_split_count,
-                           const string &capability_name = "read_vortex") {
+                           const string &capability_name = "read_vortex",
+                           const LogicalType &parameter_type = LogicalType::LIST(LogicalType::VARCHAR)) {
 	Check(!splits.empty(), "Vortex planner returned no splits");
+	const auto expected_signature =
+	    GetDistributedTableFunctionSignature(capability_name, {parameter_type}, LogicalType::INVALID);
 	for (const auto &split : splits) {
 		Check(split.kind == distributed::ScanSplitKind::EXTENSION, "Vortex emitted a non-extension split");
 		Check(split.file.path.empty(), "Vortex extension split unexpectedly contains an engine file");
 		Check(split.extension_capability.extension_name == "vortex", "wrong Vortex capability owner");
 		Check(split.extension_capability.capability.name == capability_name, "wrong Vortex capability name");
+		Check(split.extension_capability.capability.function_signature == expected_signature,
+		      "wrong Vortex capability overload signature");
 		Check(split.extension_capability.capability.protocol_version == 1, "wrong Vortex protocol version");
 		Check(split.split_codec.name == "vane.vortex-file-split", "wrong Vortex split codec");
 		Check(split.split_codec.version == 1, "wrong Vortex split codec version");
@@ -450,7 +578,7 @@ void TestProtocol() {
 	Check(glob_baseline_rows == baseline_rows, "absolute-path Vortex glob changed local file ordering or results");
 	auto glob_plan = PlanScan(coordinator_database, coordinator, glob_scan_sql, 8, glob_baseline_result->types,
 	                          glob_baseline_result->names);
-	ValidateSplitContract(glob_plan.splits, files.size());
+	ValidateSplitContract(glob_plan.splits, files.size(), "read_vortex", LogicalType::VARCHAR);
 	vector<ResultRow> glob_distributed_rows;
 	for (idx_t split_index = 0; split_index < glob_plan.splits.size(); split_index++) {
 		const auto &split = glob_plan.splits[split_index];
@@ -510,7 +638,7 @@ void TestProtocol() {
 	std::filesystem::rename(temp.path, hidden_path);
 	unique_ptr<PhysicalPlan> lifecycle_plan;
 	try {
-		lifecycle_plan = ClonePlan(planned.worker_plan, worker, 100);
+		lifecycle_plan = ClonePlanWithTransientContext(planned.worker_plan, 100);
 		std::filesystem::rename(hidden_path, temp.path);
 	} catch (...) {
 		std::filesystem::rename(hidden_path, temp.path);
@@ -772,7 +900,7 @@ void TestProtocol() {
 	Check(ReadRows(*empty_file_baseline).empty(), "empty Vortex file returned local rows");
 	auto empty_file_plan = PlanScan(coordinator_database, coordinator, empty_file_sql, 4, empty_file_baseline->types,
 	                                empty_file_baseline->names);
-	ValidateSplitContract(empty_file_plan.splits, 1);
+	ValidateSplitContract(empty_file_plan.splits, 1, "read_vortex", LogicalType::VARCHAR);
 	Check(ExecuteAssigned(empty_file_plan, worker, MakeSplitBatch(empty_file_plan.splits[0]), 350).empty(),
 	      "empty Vortex file returned distributed rows");
 
@@ -852,11 +980,12 @@ void TestProtocol() {
 
 int main() {
 	try {
+		TestWriteProtocol();
 		TestProtocol();
-		std::cout << "Vortex distributed scan protocol test passed" << std::endl;
+		std::cout << "Vortex distributed scan and write protocol tests passed" << std::endl;
 		return 0;
 	} catch (const std::exception &error) {
-		std::cerr << "Vortex distributed scan protocol test failed: " << error.what() << std::endl;
+		std::cerr << "Vortex distributed scan/write protocol test failed: " << error.what() << std::endl;
 		return 1;
 	}
 }

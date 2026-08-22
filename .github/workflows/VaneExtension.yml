@@ -24,7 +24,7 @@ jobs:
       run_native_tests: true
 
   vane-distributed-protocol:
-    name: Vane C++ explicit distributed scan protocol
+    name: Vane C++ explicit scan and COPY protocol
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -95,7 +95,7 @@ jobs:
           vcpkgGitCommitId: ${{ steps.pins.outputs.vcpkg_baseline }}
           vcpkgDirectory: ${{ github.workspace }}/protocol-vcpkg
 
-      - name: Build and execute the explicit scan protocol test
+      - name: Build and execute the explicit scan and COPY protocol test
         shell: bash
         env:
           VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/protocol-vcpkg/scripts/buildsystems/vcpkg.cmake
@@ -212,7 +212,7 @@ jobs:
           name: vane-vortex-wheel
           path: vane-wheel
 
-      - name: Exercise Vortex through two Ray workers and retry
+      - name: Exercise Vortex scans, writes, and retries through two Ray workers
         shell: bash
         run: |
           set -euo pipefail

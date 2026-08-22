@@ -5,6 +5,9 @@
 #include "vortex_duckdb.h"
 #include "table_function.h"
 #include "vortex.h"
+#include "duckdb/common/file_system.hpp"
+#include "duckdb/common/serializer/deserializer.hpp"
+#include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/main/capi/capi_internal.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -18,22 +21,37 @@
 using namespace duckdb;
 
 struct CopyBindData final : TableFunctionData {
-    CopyBindData(unique_ptr<CData> ffi_data) : ffi_data(std::move(ffi_data)) {
+    CopyBindData(unique_ptr<CData> ffi_data, vector<string> column_names, vector<LogicalType> column_types)
+        : ffi_data(std::move(ffi_data)), column_names(std::move(column_names)),
+          column_types(std::move(column_types)) {
     }
+
+    unique_ptr<FunctionData> Copy() const override;
+
     unique_ptr<CData> ffi_data;
+    vector<string> column_names;
+    vector<LogicalType> column_types;
 };
 
 struct CopyGlobalData final : GlobalFunctionData {
-    CopyGlobalData(unique_ptr<CData> ffi_data) : ffi_data(std::move(ffi_data)) {
+    CopyGlobalData(unique_ptr<CData> ffi_data, string file_path)
+        : ffi_data(std::move(ffi_data)), file_path(std::move(file_path)) {
     }
 
     unique_ptr<CData> ffi_data;
+    string file_path;
+    idx_t row_count = 0;
+    optional_ptr<CopyFunctionFileStatistics> written_statistics;
 };
 
-unique_ptr<FunctionData> copy_to_bind(ClientContext &,
-                                      CopyFunctionBindInput &,
-                                      const vector<string> &column_names,
-                                      const vector<LogicalType> &column_types) {
+static unique_ptr<CopyBindData> CreateCopyBindData(const vector<string> &column_names,
+                                                   const vector<LogicalType> &column_types) {
+    if (column_names.size() != column_types.size()) {
+        throw InvalidInputException("Vortex COPY bind has %llu column names but %llu column types",
+                                    static_cast<unsigned long long>(column_names.size()),
+                                    static_cast<unsigned long long>(column_types.size()));
+    }
+
     vector<const char *> ffi_column_names(column_names.size());
     for (size_t i = 0; i < column_names.size(); ++i) {
         ffi_column_names[i] = column_names[i].c_str();
@@ -57,7 +75,18 @@ unique_ptr<FunctionData> copy_to_bind(ClientContext &,
         throw BinderException(IntoErrString(error_out));
     }
     auto cdata = unique_ptr<CData>(reinterpret_cast<CData *>(ffi_bind_data));
-    return make_uniq<CopyBindData>(std::move(cdata));
+    return make_uniq<CopyBindData>(std::move(cdata), column_names, column_types);
+}
+
+unique_ptr<FunctionData> CopyBindData::Copy() const {
+    return CreateCopyBindData(column_names, column_types);
+}
+
+unique_ptr<FunctionData> copy_to_bind(ClientContext &,
+                                      CopyFunctionBindInput &,
+                                      const vector<string> &column_names,
+                                      const vector<LogicalType> &column_types) {
+    return CreateCopyBindData(column_names, column_types);
 }
 
 unique_ptr<GlobalFunctionData>
@@ -72,7 +101,7 @@ copy_to_initialize_global(ClientContext &, FunctionData &bind_data, const string
     }
 
     auto cdata = unique_ptr<CData>(reinterpret_cast<CData *>(ffi_global));
-    return make_uniq<CopyGlobalData>(std::move(cdata));
+    return make_uniq<CopyGlobalData>(std::move(cdata), file_path);
 }
 
 void copy_to_sink(ExecutionContext &,
@@ -88,15 +117,49 @@ void copy_to_sink(ExecutionContext &,
     if (error_out) {
         throw ExecutorException(IntoErrString(error_out));
     }
+    auto &global_data = gstate.Cast<CopyGlobalData>();
+    global_data.row_count += input.size();
+    if (global_data.written_statistics) {
+        global_data.written_statistics->row_count = global_data.row_count;
+    }
 }
 
-void copy_to_finalize(ClientContext &, FunctionData &, GlobalFunctionData &gstate) {
-    void *const ffi_global = gstate.Cast<CopyGlobalData>().ffi_data->DataPtr();
+void copy_to_finalize(ClientContext &context, FunctionData &, GlobalFunctionData &gstate) {
+    auto &global_data = gstate.Cast<CopyGlobalData>();
+    void *const ffi_global = global_data.ffi_data->DataPtr();
     duckdb_vx_error error_out = nullptr;
     duckdb_copy_function_copy_to_finalize(ffi_global, &error_out);
     if (error_out) {
         throw ExecutorException(IntoErrString(error_out));
     }
+    if (global_data.written_statistics) {
+        auto &statistics = *global_data.written_statistics;
+        statistics.row_count = global_data.row_count;
+        auto &file_system = FileSystem::GetFileSystem(context);
+        auto handle = file_system.OpenFile(global_data.file_path, FileFlags::FILE_FLAGS_READ);
+        statistics.file_size_bytes = handle->GetFileSize();
+    }
+}
+
+void copy_to_get_written_statistics(ClientContext &,
+                                    FunctionData &,
+                                    GlobalFunctionData &gstate,
+                                    CopyFunctionFileStatistics &statistics) {
+    auto &global_data = gstate.Cast<CopyGlobalData>();
+    global_data.written_statistics = statistics;
+    statistics.row_count = global_data.row_count;
+}
+
+void copy_to_serialize(Serializer &serializer, const FunctionData &bind_data, const CopyFunction &) {
+    const auto &copy_bind = bind_data.Cast<CopyBindData>();
+    serializer.WriteProperty(100, "column_names", copy_bind.column_names);
+    serializer.WriteProperty(101, "column_types", copy_bind.column_types);
+}
+
+unique_ptr<FunctionData> copy_to_deserialize(Deserializer &deserializer, CopyFunction &) {
+    auto column_names = deserializer.ReadProperty<vector<string>>(100, "column_names");
+    auto column_types = deserializer.ReadProperty<vector<LogicalType>>(101, "column_types");
+    return CreateCopyBindData(column_names, column_types);
 }
 
 static CopyFunction CreateVortexCopyFunction() {
@@ -106,8 +169,11 @@ static CopyFunction CreateVortexCopyFunction() {
     fn.copy_to_initialize_local = [](auto &, auto &) {
         return make_uniq<LocalFunctionData>();
     };
+    fn.copy_to_get_written_statistics = copy_to_get_written_statistics;
     fn.copy_to_sink = copy_to_sink;
     fn.copy_to_finalize = copy_to_finalize;
+    fn.serialize = copy_to_serialize;
+    fn.deserialize = copy_to_deserialize;
     fn.extension = "vortex";
 
     // TODO(joe): expose this via c our api

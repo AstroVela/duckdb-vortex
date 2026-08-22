@@ -43,6 +43,37 @@ def _split_batch_blobs(connection: object, sql: str) -> list[bytes]:
     return [bytes(batch) for batches in split_batch_map.values() for batch in batches]
 
 
+def _capture_file_write_relation(
+    monkeypatch: pytest.MonkeyPatch,
+    relation: object,
+    output: Path,
+) -> object:
+    captured: list[object] = []
+
+    class _CapturingRunner:
+        name = "ray"
+
+        def run_write(self, write_relation: object) -> dict[str, bool]:
+            captured.append(write_relation)
+            return {"captured": True}
+
+    # A fresh connection has no cached runner. Capture the lazily constructed
+    # write relation, then submit that exact object through the real Ray runner
+    # so the test can inspect Vane's commit result.
+    with monkeypatch.context() as capture:
+        capture.setenv("VANE_RUNNER", "ray")
+        capture.setattr(
+            vane_runners,
+            "set_runner_ray",
+            lambda *_args, **_kwargs: _CapturingRunner(),
+        )
+        relation.write_file(str(output), format="vortex")
+
+    assert len(captured) == 1
+    assert captured[0].type == "WRITE_FILE_RELATION"
+    return captured[0]
+
+
 @dataclass
 class RayVortexHarness:
     runner: object
@@ -206,13 +237,119 @@ def test_explicit_splits_run_on_multiple_ray_workers(
     assert len(scan_node_ids) >= 2, fragment_stats
 
 
+def test_distributed_vortex_write_commits_worker_files_and_round_trips(
+    ray_vortex_harness: RayVortexHarness,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    harness = ray_vortex_harness
+    output = harness.root / "distributed-vortex-output"
+    source_sql = f"""
+        SELECT id, grp, payload
+        FROM read_vortex({harness.source})
+        WHERE id >= 750 AND id < 3250
+    """
+    expected = harness.connection.execute(source_sql).to_arrow_table().sort_by("id")
+
+    write_connection = vane.connect()
+    try:
+        write_relation = _capture_file_write_relation(
+            monkeypatch,
+            write_connection.sql(source_sql),
+            output,
+        )
+
+        if harness.runner.query_driver_client is None:
+            harness.require_query("SELECT 1 AS ready")
+        driver_client = harness.runner.query_driver_client
+        assert driver_client is not None
+        before_stats = ray.get(driver_client.runner.fragment_stats.remote())
+        before_hits = {
+            worker_id: int(stats.get("lookup_hits", 0)) for worker_id, stats in before_stats["workers"].items()
+        }
+
+        result = harness.runner.run_write(write_relation)
+
+        assert result["rows_copied"] == expected.num_rows == 2_500
+        assert result["copy_output_base_path"] == str(output)
+        assert result["copy_output_direct_write"] is True
+        assert result["copy_output_committed"] is True
+        assert result["copy_output_outcome_unknown"] is False
+        assert result["copy_selected_file_count"] == len(harness.files)
+        assert Path(result["copy_output_manifest_path"]).is_file()
+        assert Path(result["copy_output_committed_marker_path"]).is_file()
+
+        output_files = [Path(entry["final_path"]) for entry in result["files"]]
+        assert len(output_files) == len(harness.files)
+        assert len(set(output_files)) == len(output_files)
+        assert all(path.is_file() and path.suffix == ".vortex" for path in output_files)
+        assert sum(int(entry["row_count"]) for entry in result["files"]) == expected.num_rows
+        assert all(
+            int(entry["file_size_bytes"]) == Path(entry["final_path"]).stat().st_size > 0 for entry in result["files"]
+        )
+
+        output_source = "[" + ", ".join(_sql_string(path) for path in output_files) + "]"
+        actual = harness.connection.execute(
+            f"SELECT id, grp, payload FROM read_vortex({output_source})"
+        ).to_arrow_table()
+        actual = actual.sort_by("id")
+        assert actual.schema == expected.schema
+        assert actual.equals(expected)
+
+        after_stats = ray.get(driver_client.runner.fragment_stats.remote())
+        write_workers = {
+            worker_id
+            for worker_id, stats in after_stats["workers"].items()
+            if int(stats.get("lookup_hits", 0)) > before_hits.get(worker_id, 0)
+        }
+        assert len(write_workers) >= 2, after_stats
+        assert len({worker_id.rsplit(":", 2)[-2] for worker_id in write_workers}) >= 2
+    finally:
+        write_connection.close()
+
+
+def test_distributed_vortex_write_commits_empty_artifact(
+    ray_vortex_harness: RayVortexHarness,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    harness = ray_vortex_harness
+    output = harness.root / "distributed-vortex-empty-output"
+    empty_sql = f"""
+        SELECT id, payload
+        FROM read_vortex({harness.source})
+        WHERE file_index = 99
+    """
+
+    write_connection = vane.connect()
+    try:
+        write_relation = _capture_file_write_relation(
+            monkeypatch,
+            write_connection.sql(empty_sql),
+            output,
+        )
+        result = harness.runner.run_write(write_relation)
+
+        assert result["rows_copied"] == 0
+        assert result["copy_output_committed"] is True
+        assert result["copy_selected_file_count"] == 1
+        assert len(result["files"]) == 1
+        output_file = Path(result["files"][0]["final_path"])
+        assert output_file.is_file()
+        assert result["files"][0]["row_count"] == 0
+        assert result["files"][0]["file_size_bytes"] == output_file.stat().st_size > 0
+        assert Path(result["copy_output_committed_marker_path"]).is_file()
+        count = harness.connection.execute(f"SELECT count(*) FROM read_vortex({_sql_string(output_file)})").fetchone()
+        assert count == (0,)
+    finally:
+        write_connection.close()
+
+
 def test_absolute_glob_has_stable_distributed_splits(
     ray_vortex_harness: RayVortexHarness,
 ):
     harness = ray_vortex_harness
     glob_sql = f"""
         SELECT id, file_index
-        FROM read_vortex({_sql_string(harness.root / 'part-*.vortex')})
+        FROM read_vortex({_sql_string(harness.root / "part-*.vortex")})
         WHERE id >= 750 AND id < 3250
     """
     list_sql = f"""

@@ -19,7 +19,7 @@ endif()
 
 option(USE_SHARED_VORTEX OFF)
 option(VORTEX_ENABLE_VANE
-       "Enable Vane-only registration and explicit distributed scans" OFF)
+       "Enable Vane-only registration, explicit scans, and distributed COPY" OFF)
 set(VORTEX_RUST_TARGET_NAME "vortex_duckdb")
 if (USE_SHARED_VORTEX)
     set(VORTEX_LIB_TYPE "cdylib")
@@ -140,7 +140,7 @@ install(
 )
 
 option(BUILD_VORTEX_DISTRIBUTED_TESTS
-       "Build the Vane explicit distributed scan protocol test" OFF)
+       "Build the Vane explicit distributed scan and COPY protocol test" OFF)
 if(BUILD_VORTEX_DISTRIBUTED_TESTS)
     if(NOT VORTEX_ENABLE_VANE)
         message(FATAL_ERROR

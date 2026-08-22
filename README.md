@@ -85,13 +85,16 @@ source.
 
 The Vane lane uses the additive `vane_extension_config.cmake`; the existing
 `extension_config.cmake` remains the configuration for ordinary DuckDB. The
-Vane-specific table-function registration and distributed scan callbacks are
-enabled only by that additive config after it verifies Vane's distributed
+Vane-specific loader registration and distributed scan callbacks are enabled
+only by that additive config after it verifies Vane's distributed
 table-function header; ordinary DuckDB builds retain the existing C API
-registration path. The Vane CI workflow validates the native lane, builds and
-verifies the statically linked wheel, then runs the Vortex scan and retry tests
-against a local two-node Ray cluster. It does not download or install a Vortex
-extension at worker runtime.
+registration path. The ordinary Vortex COPY function also exposes owned bind
+cloning, bind serialization, and written-file statistics through standard
+DuckDB APIs, so it remains usable in both builds. The Vane CI workflow validates
+the native lane, builds and verifies the statically linked wheel, then runs the
+Vortex scan, distributed write, empty-input, and worker-loss retry tests against
+a local two-node Ray cluster. It does not download or install a Vortex extension
+at worker runtime.
 
 The current elementary split granularity for row-producing scans is one
 already-bound Vortex file. If DuckDB pushes a final aggregate completely into
@@ -108,6 +111,20 @@ paths with equivalent credentials. Vane builds also disable Vortex late
 materialization because its second scan would otherwise require coupled split
 assignment.
 
+Vane also exposes the format-neutral relation API
+`relation.write_file(path, format="vortex")`. The coordinator binds the Vortex
+COPY once, serializes its owned column names and logical types, and gives each
+selected input task a unique immutable output path. Workers return exact file,
+row-count, and byte-size statistics; Vane selects successful attempts and
+publishes one committed manifest. An explicitly empty input still produces one
+valid zero-row Vortex artifact.
+
+The current Rust Vortex writer opens paths through the local filesystem rather
+than DuckDB's object-store filesystem. A real multi-node Ray deployment must
+therefore provide the same shared local path namespace to every worker and the
+coordinator. Object-store output, catalog-backed tables, CTAS, INSERT, UPDATE,
+and DELETE are not Vortex write capabilities in this integration.
+
 ## Running the extension
 
 To run the extension code, simply start the shell with `./build/release/duckdb`.
@@ -121,6 +138,16 @@ COPY (SELECT * from generate_series(0, 4)) TO 'FILENAME.vortex' (FORMAT VORTEX);
 ```
 
 This will create a compressed vortex file from the sql table.
+
+With a Vane wheel and the Ray runner selected, use the relation entry point so
+the write is scheduled rather than executed immediately on the coordinator:
+
+```python
+relation.write_file("/shared/output", format="vortex")
+```
+
+The coordinator commits a manifest containing the selected worker file list;
+the target is a managed output directory, not one monolithic file.
 
 ### Reading a file
 

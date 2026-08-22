@@ -6,4 +6,4 @@ native_test_selection = "test/*"
 
 [vane]
 repository = "AstroVela/vane"
-revision = "77c095a67c87c14ddb04022f677a629a943e4920"
+revision = "5059e10e1f570ba6d93939d104e0f6e8152c56cb"

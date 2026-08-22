@@ -111,15 +111,46 @@ def main() -> None:
             def verify_absolute_glob() -> None:
                 glob_query = f"""
                     SELECT id, file_index
-                    FROM read_vortex({sql_string(root / 'part-*.vortex')})
+                    FROM read_vortex({sql_string(root / "part-*.vortex")})
                     WHERE id >= 7 AND id < 25
                     ORDER BY id
                 """
                 expected = connection.execute(glob_query).fetchall()
-                require_equal(len(split_batches(vane, connection, glob_query)), 3, "absolute glob splits")
-                require_equal(connection.sql(glob_query).fetchall(), expected, "absolute glob scan")
+                require_equal(
+                    len(split_batches(vane, connection, glob_query)),
+                    3,
+                    "absolute glob splits",
+                )
+                require_equal(
+                    connection.sql(glob_query).fetchall(),
+                    expected,
+                    "absolute glob scan",
+                )
 
             run_scenario("absolute-path glob planning", verify_absolute_glob)
+
+            def verify_generic_vortex_writer() -> None:
+                output = root / "generic-writer.vortex"
+                expected = connection.execute(f"""
+                    SELECT id, grp, payload
+                    FROM read_vortex({source})
+                    WHERE id >= 7 AND id < 25
+                    ORDER BY id
+                    """).fetchall()
+                connection.sql(f"""
+                    SELECT id, grp, payload
+                    FROM read_vortex({source})
+                    WHERE id >= 7 AND id < 25
+                    """).write_file(str(output), format="vortex")
+                actual = connection.execute(
+                    f"SELECT id, grp, payload FROM read_vortex({sql_string(output)}) ORDER BY id"
+                ).fetchall()
+                require_equal(actual, expected, "generic Vortex writer round-trip")
+
+            run_scenario(
+                "generic COPY-format relation writes Vortex",
+                verify_generic_vortex_writer,
+            )
 
             def verify_empty_assignment() -> None:
                 empty_query = f"""
@@ -127,7 +158,11 @@ def main() -> None:
                     FROM read_vortex({source})
                     WHERE file_index = 99
                 """
-                require_equal(len(split_batches(vane, connection, empty_query)), 1, "explicit empty split batch")
+                require_equal(
+                    len(split_batches(vane, connection, empty_query)),
+                    1,
+                    "explicit empty split batch",
+                )
                 require_equal(connection.sql(empty_query).fetchall(), [], "explicit empty scan")
 
             run_scenario("explicit empty split planning", verify_empty_assignment)
