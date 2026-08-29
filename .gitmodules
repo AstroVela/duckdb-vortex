@@ -8,3 +8,6 @@
 [submodule "vcpkg"]
 	path = vcpkg
 	url = https://github.com/microsoft/vcpkg.git
+[submodule "vane-extension-ci-tools"]
+	path = vane-extension-ci-tools
+	url = https://github.com/AstroVela/vane-extension-ci-tools.git

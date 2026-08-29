@@ -18,6 +18,7 @@ if(NOT DEFINED DUCKDB_VERSION OR "${DUCKDB_VERSION}" STREQUAL "")
 endif()
 
 option(USE_SHARED_VORTEX OFF)
+option(VORTEX_VANE_DISTRIBUTED "Build Vane distributed Vortex support" OFF)
 set(VORTEX_RUST_TARGET_NAME "vortex_duckdb")
 if (USE_SHARED_VORTEX)
     set(VORTEX_LIB_TYPE "cdylib")
