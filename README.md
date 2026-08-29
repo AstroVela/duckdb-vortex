@@ -59,8 +59,10 @@ The main binaries that will be built are:
 The Vane build is independent from the ordinary DuckDB extension build. It is
 described by `vane-extension.toml`, uses `extension_config_vane.cmake`, and
 compiles against `external/duckdb` from the exact Vane commit recorded in the
-manifest. The ordinary `make` and `make test` commands continue to use the
-repository's `duckdb/`, `extension-ci-tools/`, and `extension_config.cmake`.
+manifest. The manifest also pins the exact vcpkg revision used by both local
+and hosted Vane builds. The ordinary `make` and `make test` commands continue
+to use the repository's `duckdb/`, `extension-ci-tools/`, and
+`extension_config.cmake`.
 
 Initialize the Vane CI tooling and validate the exact source identities:
 
@@ -68,6 +70,7 @@ Initialize the Vane CI tooling and validate the exact source identities:
 git submodule update --init vane-extension-ci-tools
 make vane_validate
 make vane_identity
+make vane_verify_vcpkg
 ```
 
 Run the Vane-native extension lane with the repository's vcpkg toolchain:

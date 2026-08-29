@@ -36,14 +36,15 @@ jobs:
           git diff --exit-code "origin/${VANE_BASE_REF}...HEAD" -- \
             duckdb \
             extension-ci-tools \
-            extension_config.cmake
+            extension_config.cmake \
+            vcpkg
 
   vane-extension:
     permissions:
       contents: read
-    uses: AstroVela/vane-extension-ci-tools/.github/workflows/_vane_extension_ci.yml@28c253d71645b627e90307a8c0f42bf74bda0046
+    uses: AstroVela/vane-extension-ci-tools/.github/workflows/_vane_extension_ci.yml@b2b27bee02da0400ae1fd1565b17486b8cc2e629
     with:
-      ci_tools_version: 28c253d71645b627e90307a8c0f42bf74bda0046
+      ci_tools_version: b2b27bee02da0400ae1fd1565b17486b8cc2e629
       manifest: vane-extension.toml
       build_jobs: 8
       run_native_tests: true
