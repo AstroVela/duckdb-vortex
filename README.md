@@ -89,6 +89,54 @@ make vane_wheel
 All Vane targets use the `vane_` prefix and fail if the Vane tooling, exact
 source revision, distributed headers, or required build inputs are absent.
 
+The Vane lane selects `vortex-extension-vane/Cargo.toml`; the ordinary lane
+continues to select `vortex-extension/Cargo.toml`. The Vane manifest builds a
+vendored snapshot of `vortex-duckdb` at
+`vortex-data/vortex@7e06a99bb7772087c9546137ea6f4593235426a6` with its `vane`
+feature. This is the only path that compiles the Vane table-function ABI and
+distributed scan protocol. No ordinary DuckDB source, submodule, manifest, or
+registration path is replaced.
+
+### Vane distributed Vortex scans
+
+Vane registers distributed callbacks for both `read_vortex` and
+`vortex_scan`, including the `VARCHAR` and `LIST<VARCHAR>` overloads. Planning
+turns the coordinator's fully bound file listing into immutable owned state,
+serializes that state for workers, and creates one split per bound file. A
+worker opens exactly the files named by its assigned splits; it never expands
+the original path or glob again. The split identity includes the scan UUID,
+stable file index, canonical source URL and object path, and the file's byte
+length. A missing file, changed byte length, duplicate split, unknown split,
+foreign scan UUID, or non-canonical payload fails the query.
+
+A fully pushed-down final aggregate is planned as one indivisible split over
+the complete pruned file set because independent final aggregates cannot be
+combined by this protocol. Empty scans and empty worker assignments are valid.
+Vortex late materialization is disabled in Vane builds because its second scan
+would require coupled split assignment.
+
+The current scope is deliberately limited to distributed reads:
+
+| Capability | Issue #4 behavior |
+| --- | --- |
+| Distributed `read_vortex` / `vortex_scan` | Enabled |
+| Local `COPY ... (FORMAT VORTEX)` | Enabled |
+| Distributed Vortex COPY | Not registered; tracked by #6 |
+| Sub-file/row-group splitting | Not implemented; tracked by #9 |
+
+The reader API does not expose an immutable object-version or content hash, so
+a same-path, same-size in-place rewrite cannot be detected. Distributed inputs
+must therefore remain immutable, or use versioned/content-addressed paths, for
+the lifetime of planning and retries. Every worker must be able to access the
+same canonical URLs with equivalent credentials.
+
+To build and run the focused protocol executable after the Vane-native build:
+
+```sh
+cmake --build build/vane-native --target vortex_distributed_protocol_test --parallel
+./build/vane-native/extension/vortex/vortex_distributed_protocol_test
+```
+
 ## Running the extension
 
 To run the extension code, simply start the shell with `./build/release/duckdb`.
@@ -194,7 +242,7 @@ When a PR is merged to `main`, the cherry-pick workflow automatically applies th
 
 The current release branch is configured in `.github/workflows/CherryPick.yml` via the `RELEASE_BRANCH` env var.
 
-## Changing Vortex version
+## Changing the native Vortex version
 
 The Vortex version is defined in `vortex-extension/Cargo.toml`. It can be a git commit, tag, branch or even a local path:
 
@@ -203,3 +251,10 @@ vortex-duckdb = { path = "<path/to/vortex/vortex-duckdb>"}
 ```
 
 See the Cargo docs for [git](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#specifying-dependencies-from-git-repositories) or [path](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#specifying-path-dependencies) dependencies for full details.
+
+The Vane lane is intentionally pinned separately. To update it, replace
+`vortex-extension-vane/vendor/vortex-duckdb` from one immutable upstream
+commit, reapply and review only the `vane`-gated protocol changes documented in
+the vendored README, update all Vortex Git revisions and its upstream link to
+that same commit, then regenerate `vortex-extension-vane/Cargo.lock`. Validate
+both the ordinary DuckDB lane and the Vane lane before merging the update.

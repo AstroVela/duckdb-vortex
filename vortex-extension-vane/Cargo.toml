@@ -1,0 +1,29 @@
+[package]
+name = "vortex-extension"
+description = "C-compatible Vortex DuckDB extension artifacts for Vane"
+edition = "2024"
+publish = false
+
+[workspace]
+members = ["vendor/vortex-duckdb"]
+default-members = ["."]
+resolver = "2"
+
+[lib]
+name = "vortex_duckdb"
+path = "src/lib.rs"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+vortex-duckdb = { path = "vendor/vortex-duckdb" }
+
+[features]
+vane = ["vortex-duckdb/vane"]
+
+[profile.dev.package.vortex-fastlanes]
+debug = false
+
+[profile.release-lto]
+inherits = "release"
+lto = "fat"
+codegen-units = 1

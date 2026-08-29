@@ -6,7 +6,7 @@ native_test_selection = "test/sql/sequence.test"
 
 [vane]
 repository = "AstroVela/vane"
-revision = "64ed91c7e7ea7791b93e81e98fac0e8dce5da4de"
+revision = "967bdbbce7dde39c41bcb4949a49a909bb8e1915"
 
 [vcpkg]
 repository = "microsoft/vcpkg"
