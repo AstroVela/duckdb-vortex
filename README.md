@@ -90,12 +90,13 @@ All Vane targets use the `vane_` prefix and fail if the Vane tooling, exact
 source revision, distributed headers, or required build inputs are absent.
 
 The Vane lane selects `vortex-extension-vane/Cargo.toml`; the ordinary lane
-continues to select `vortex-extension/Cargo.toml`. The Vane manifest builds a
-vendored snapshot of `vortex-duckdb` at
-`vortex-data/vortex@7e06a99bb7772087c9546137ea6f4593235426a6` with its `vane`
-feature. This is the only path that compiles the Vane table-function ABI and
-distributed scan protocol. No ordinary DuckDB source, submodule, manifest, or
-registration path is replaced.
+continues to select `vortex-extension/Cargo.toml`. The Vane manifest pins the
+companion adapter commit
+`AstroVela/vortex@1726615c7107e2b5e461c5a8767f682a4a02164f`, based on the same
+`vortex-data/vortex@7e06a99bb7772087c9546137ea6f4593235426a6` revision used by
+the native manifest. CMake explicitly sets `VORTEX_VANE_DISTRIBUTED=1` only
+for this lane. No ordinary DuckDB source, submodule, manifest, or registration
+path is replaced.
 
 ### Vane distributed Vortex scans
 
@@ -252,9 +253,10 @@ vortex-duckdb = { path = "<path/to/vortex/vortex-duckdb>"}
 
 See the Cargo docs for [git](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#specifying-dependencies-from-git-repositories) or [path](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#specifying-path-dependencies) dependencies for full details.
 
-The Vane lane is intentionally pinned separately. To update it, replace
-`vortex-extension-vane/vendor/vortex-duckdb` from one immutable upstream
-commit, reapply and review only the `vane`-gated protocol changes documented in
-the vendored README, update all Vortex Git revisions and its upstream link to
-that same commit, then regenerate `vortex-extension-vane/Cargo.lock`. Validate
-both the ordinary DuckDB lane and the Vane lane before merging the update.
+The Vane lane is intentionally pinned separately. Its adapter changes live on
+an AstroVela/vortex branch based on the exact native Vortex revision and remain
+behind the explicit `VORTEX_VANE_DISTRIBUTED` build mode. To update it, review
+and merge the companion Vortex change first, pin its immutable commit in
+`vortex-extension-vane/Cargo.toml`, then regenerate
+`vortex-extension-vane/Cargo.lock`. Validate both the ordinary DuckDB lane and
+the Vane lane before merging the update.

@@ -367,7 +367,7 @@ void WritePayloadU64(string &payload, idx_t offset, uint64_t value) {
 }
 
 distributed::ScanSplitBatch MakeSplitBatchWithScanIdentity(const distributed::ScanSplit &scan_template,
-	                                                        const distributed::ScanSplit &files_template) {
+                                                           const distributed::ScanSplit &files_template) {
 	auto result = MakeSplitBatch(scan_template);
 	auto &split = result.splits[0];
 	auto target_file_count_offset = PayloadFileCountOffset(split.extension_payload);
@@ -712,8 +712,7 @@ void TestProtocol() {
 	}
 	std::sort(not_equal_rows.begin(), not_equal_rows.end());
 	Check(not_equal_rows == not_equal_baseline_rows, "file_index-not-equal distributed result differs from baseline");
-	ExpectApplyFailure(not_equal, worker,
-	                   MakeSplitBatchWithScanIdentity(not_equal.splits[0], planned.splits[1]),
+	ExpectApplyFailure(not_equal, worker, MakeSplitBatchWithScanIdentity(not_equal.splits[0], planned.splits[1]),
 	                   "outside the planned file set");
 
 	const auto row_number_sql =

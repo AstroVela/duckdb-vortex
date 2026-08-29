@@ -5,8 +5,6 @@ edition = "2024"
 publish = false
 
 [workspace]
-members = ["vendor/vortex-duckdb"]
-default-members = ["."]
 resolver = "2"
 
 [lib]
@@ -15,10 +13,10 @@ path = "src/lib.rs"
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
-vortex-duckdb = { path = "vendor/vortex-duckdb" }
+vortex-duckdb = { git = "https://github.com/AstroVela/vortex.git", rev = "1726615c7107e2b5e461c5a8767f682a4a02164f" }
 
 [features]
-vane = ["vortex-duckdb/vane"]
+vane = []
 
 [profile.dev.package.vortex-fastlanes]
 debug = false
