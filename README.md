@@ -54,6 +54,38 @@ The main binaries that will be built are:
 - `unittest` is the test runner of duckdb. Again, the extension is already linked into the binary.
 - `vortex_duckdb.duckdb_extension` is the loadable binary as it would be distributed.
 
+### Vane build lane
+
+The Vane build is independent from the ordinary DuckDB extension build. It is
+described by `vane-extension.toml`, uses `extension_config_vane.cmake`, and
+compiles against `external/duckdb` from the exact Vane commit recorded in the
+manifest. The ordinary `make` and `make test` commands continue to use the
+repository's `duckdb/`, `extension-ci-tools/`, and `extension_config.cmake`.
+
+Initialize the Vane CI tooling and validate the exact source identities:
+
+```sh
+git submodule update --init vane-extension-ci-tools
+make vane_validate
+make vane_identity
+```
+
+Run the Vane-native extension lane with the repository's vcpkg toolchain:
+
+```sh
+export VCPKG_TOOLCHAIN_PATH="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake"
+make vane_ci
+```
+
+On 64-bit x86 Linux, build and verify the statically linked Vane wheel with:
+
+```sh
+make vane_wheel
+```
+
+All Vane targets use the `vane_` prefix and fail if the Vane tooling, exact
+source revision, distributed headers, or required build inputs are absent.
+
 ## Running the extension
 
 To run the extension code, simply start the shell with `./build/release/duckdb`.

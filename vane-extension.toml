@@ -1,0 +1,9 @@
+schema_version = 1
+name = "vortex"
+extension_config = "extension_config_vane.cmake"
+build_extensions = ["httpfs", "parquet"]
+native_test_selection = "test/sql/sequence.test"
+
+[vane]
+repository = "AstroVela/vane"
+revision = "64ed91c7e7ea7791b93e81e98fac0e8dce5da4de"

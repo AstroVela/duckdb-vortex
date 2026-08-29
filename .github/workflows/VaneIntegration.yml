@@ -1,0 +1,49 @@
+name: Vane Extension
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}
+  cancel-in-progress: true
+
+jobs:
+  native-isolation:
+    name: Verify native DuckDB isolation
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout extension history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reject changes to the native build inputs
+        shell: bash
+        env:
+          VANE_BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          test -n "$VANE_BASE_REF"
+          git diff --exit-code "origin/${VANE_BASE_REF}...HEAD" -- \
+            duckdb \
+            extension-ci-tools \
+            extension_config.cmake
+
+  vane-extension:
+    permissions:
+      contents: read
+    uses: AstroVela/vane-extension-ci-tools/.github/workflows/_vane_extension_ci.yml@28c253d71645b627e90307a8c0f42bf74bda0046
+    with:
+      ci_tools_version: 28c253d71645b627e90307a8c0f42bf74bda0046
+      manifest: vane-extension.toml
+      build_jobs: 8
+      run_native_tests: true
