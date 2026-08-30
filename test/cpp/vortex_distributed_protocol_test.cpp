@@ -3,11 +3,18 @@
 
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/value.hpp"
+#include "duckdb/execution/distributed/copy_finalize.hpp"
+#include "duckdb/execution/distributed/copy_to_file.hpp"
+#include "duckdb/execution/distributed/pipeline_node/copy_finish.hpp"
 #include "duckdb/execution/distributed/pipeline_node/pipeline_node.hpp"
+#include "duckdb/execution/distributed/pipeline_node/translator.hpp"
 #include "duckdb/execution/distributed/pipeline_node/translator_scan.hpp"
 #include "duckdb/execution/distributed/plan/scan_split.hpp"
+#include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
+#include "duckdb/function/copy_function.hpp"
 #include "duckdb/function/distributed_table_function.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
@@ -209,6 +216,12 @@ unique_ptr<PhysicalPlan> CloneNativePlan(const distributed::DuckPhysicalPlanRef 
 	return plan;
 }
 
+unique_ptr<PhysicalPlan> CloneNativePlanWithTransientContext(const distributed::DuckPhysicalPlanRef &source) {
+	DuckDB clone_database(nullptr);
+	Connection clone_connection(clone_database);
+	return CloneNativePlan(source, clone_connection);
+}
+
 void ApplySplitBatch(PhysicalPlan &plan, idx_t scan_node_id, const distributed::ScanSplitBatch &batch) {
 	unordered_map<idx_t, distributed::ScanSplitBatch> assignments;
 	assignments.emplace(scan_node_id, batch);
@@ -245,6 +258,399 @@ unique_ptr<QueryResult> ExecutePreparedPlan(Connection &worker, shared_ptr<Prepa
 unique_ptr<QueryResult> ExecutePlan(Connection &worker, unique_ptr<PhysicalPlan> plan, const vector<LogicalType> &types,
                                     const vector<string> &names, const string &label) {
 	return ExecutePreparedPlan(worker, PreparePlan(std::move(plan), types, names), label);
+}
+
+string CopyRangeSQL(const std::filesystem::path &path, idx_t begin, idx_t end, bool return_stats = true) {
+	return "COPY (SELECT CAST(range AS BIGINT) AS id, 'row-' || CAST(range AS "
+	       "VARCHAR) AS payload FROM range(" +
+	       std::to_string(begin) + ", " + std::to_string(end) + ")) TO " + SQLString(path) + " (FORMAT VORTEX" +
+	       (return_stats ? ", RETURN_STATS true" : "") + ", USE_TMP_FILE false)";
+}
+
+distributed::DistributedCopyFileInfo ReadCopyStatistics(QueryResult &result, const std::filesystem::path &path,
+                                                        idx_t expected_rows) {
+	if (result.HasError()) {
+		throw std::runtime_error("Vortex COPY statistics query failed: " + result.GetError());
+	}
+	auto *materialized = dynamic_cast<MaterializedQueryResult *>(&result);
+	Check(materialized != nullptr, "expected materialized Vortex COPY statistics");
+	Check(materialized->ColumnCount() == 6 && materialized->RowCount() == 1,
+	      "Vortex COPY did not return one written-file statistics row");
+
+	distributed::DistributedCopyFileInfo info;
+	info.staging_path = materialized->GetValue(0, 0).GetValue<string>();
+	info.row_count = materialized->GetValue(1, 0).GetValue<uint64_t>();
+	info.file_size_bytes = materialized->GetValue(2, 0).GetValue<uint64_t>();
+	info.footer_size_bytes = materialized->GetValue(3, 0);
+	info.column_statistics = materialized->GetValue(4, 0);
+	info.partition_keys = materialized->GetValue(5, 0);
+	Check(info.staging_path == path.string(), "Vortex COPY statistics returned the wrong file path");
+	Check(info.row_count == expected_rows, "Vortex COPY statistics returned the wrong row count");
+	Check(info.file_size_bytes > 0, "Vortex COPY statistics returned an empty file size");
+	Check(info.file_size_bytes == std::filesystem::file_size(path),
+	      "Vortex COPY statistics file size does not match the written artifact");
+	Check(info.footer_size_bytes.IsNull(), "Vortex COPY unexpectedly reported a footer size");
+	Check(!info.column_statistics.IsNull() && MapValue::GetChildren(info.column_statistics).empty(),
+	      "Vortex COPY unexpectedly reported column statistics");
+	Check(info.partition_keys.IsNull(), "Vortex COPY unexpectedly reported partition keys");
+	return info;
+}
+
+unique_ptr<PhysicalPlan> CloneCopyAttemptPlan(const distributed::DuckPhysicalPlanRef &source,
+                                              const std::filesystem::path &attempt_path) {
+	auto plan = CloneNativePlanWithTransientContext(source);
+	Check(plan != nullptr && plan->HasRoot(), "cloned Vortex COPY worker plan has no root");
+	Check(plan->Root().type == PhysicalOperatorType::COPY_TO_FILE, "cloned Vortex COPY worker plan has the wrong root");
+	auto &copy = plan->Root().Cast<PhysicalCopyToFile>();
+	Check(copy.function.name == "vortex", "cloned Vortex COPY worker plan has the wrong function");
+	Check(copy.function.serialize && copy.function.deserialize,
+	      "cloned Vortex COPY worker plan lost bind serialization callbacks");
+	Check(copy.function.copy_to_get_written_statistics, "cloned Vortex COPY worker plan lost written statistics");
+	Check(copy.bind_data != nullptr && copy.bind_data->Copy() != nullptr,
+	      "cloned Vortex COPY worker plan has no portable bind clone");
+	Check(!copy.use_tmp_file && copy.return_type == CopyFunctionReturnType::WRITTEN_FILE_STATISTICS &&
+	          copy.write_empty_file && copy.file_extension == "vortex",
+	      "cloned Vortex COPY worker plan changed its portable options");
+	Check(copy.names == vector<string> {"id", "payload"} &&
+	          copy.expected_types == vector<LogicalType> {LogicalType::BIGINT, LogicalType::VARCHAR},
+	      "cloned Vortex COPY worker plan changed its owned schema");
+	Check(copy.file_path != attempt_path.string(), "Vortex COPY attempt path crossed the serialization boundary");
+	copy.file_path = attempt_path.string();
+	copy.use_tmp_file = false;
+	copy.return_type = CopyFunctionReturnType::WRITTEN_FILE_STATISTICS;
+	return plan;
+}
+
+distributed::DistributedCopyFileInfo ExecuteCopyAttempt(Connection &worker, unique_ptr<PhysicalPlan> plan,
+                                                        const std::filesystem::path &attempt_path, idx_t expected_rows,
+                                                        const string &label) {
+	auto result_types = GetCopyFunctionReturnLogicalTypes(CopyFunctionReturnType::WRITTEN_FILE_STATISTICS);
+	auto result_names = GetCopyFunctionReturnNames(CopyFunctionReturnType::WRITTEN_FILE_STATISTICS);
+	auto result = ExecutePlan(worker, std::move(plan), result_types, result_names, label);
+	Check(result != nullptr, "Vortex COPY worker returned no result");
+	return ReadCopyStatistics(*result, attempt_path, expected_rows);
+}
+
+string VortexFileList(const std::vector<distributed::DistributedCopyFileInfo> &files) {
+	Check(!files.empty(), "cannot build an empty Vortex file list");
+	string result = "[";
+	for (idx_t file_index = 0; file_index < files.size(); file_index++) {
+		if (file_index > 0) {
+			result += ", ";
+		}
+		const auto &path =
+		    files[file_index].final_path.empty() ? files[file_index].staging_path : files[file_index].final_path;
+		result += SQLString(std::filesystem::path(path));
+	}
+	return result + "]";
+}
+
+void CheckVortexDataset(Connection &connection, const std::vector<distributed::DistributedCopyFileInfo> &files,
+                        idx_t expected_rows, int64_t expected_sum, int64_t expected_min, int64_t expected_max,
+                        const string &label) {
+	auto result = connection.Query(
+	    "SELECT count(*), count(DISTINCT id), CAST(sum(id) AS BIGINT), min(id), max(id), "
+	    "count(*) FILTER (WHERE payload IS DISTINCT FROM 'row-' || CAST(id AS VARCHAR)) FROM read_vortex(" +
+	    VortexFileList(files) + ")");
+	Check(result != nullptr && !result->HasError() && result->RowCount() == 1,
+	      label + " Vortex dataset could not be read");
+	Check(result->GetValue(0, 0).GetValue<int64_t>() == static_cast<int64_t>(expected_rows) &&
+	          result->GetValue(1, 0).GetValue<int64_t>() == static_cast<int64_t>(expected_rows) &&
+	          result->GetValue(2, 0).GetValue<int64_t>() == expected_sum &&
+	          result->GetValue(3, 0).GetValue<int64_t>() == expected_min &&
+	          result->GetValue(4, 0).GetValue<int64_t>() == expected_max &&
+	          result->GetValue(5, 0).GetValue<int64_t>() == 0,
+	      label + " Vortex dataset contains duplicate, missing, or changed rows");
+}
+
+void CheckEmptyVortexDataset(Connection &connection, const std::vector<distributed::DistributedCopyFileInfo> &files,
+                             const string &label) {
+	auto result = connection.Query("SELECT count(*) FROM read_vortex(" + VortexFileList(files) + ")");
+	Check(result != nullptr && !result->HasError() && result->RowCount() == 1 &&
+	          result->GetValue(0, 0).GetValue<int64_t>() == 0,
+	      label + " Vortex dataset is not empty");
+}
+
+std::filesystem::path BuildCopyAttemptPath(FileSystem &fs, const distributed::DistributedCopySpec &spec,
+                                           const string &run_id, const string &attempt_id) {
+	return distributed::BuildCopyDirectTargetFilePath(
+	    spec.file_path, run_id, attempt_id, distributed::GetCopyBaseName(spec), fs.PathSeparator(spec.file_path));
+}
+
+void TestWriteProtocol() {
+	auto temp = MakeTempDirectory();
+	DuckDB coordinator_database(nullptr);
+	Connection coordinator(coordinator_database);
+	auto &fs = FileSystem::GetFileSystem(*coordinator.context);
+
+	// The Vane registrar also serves ordinary local COPY. Exact statistics must
+	// describe the closed artifact, and the file must remain readable by Vortex.
+	auto local_output = temp.path / "local.vortex";
+	auto local_result = coordinator.Query(CopyRangeSQL(local_output, 0, 5));
+	Check(local_result != nullptr, "local Vane Vortex COPY returned no result");
+	auto local_info = ReadCopyStatistics(*local_result, local_output, 5);
+	local_info.final_path = local_info.staging_path;
+	CheckVortexDataset(coordinator, std::vector<distributed::DistributedCopyFileInfo> {local_info}, 5, 10, 0, 4,
+	                   "local COPY");
+
+	auto output_root = temp.path / "distributed-output";
+	std::filesystem::create_directories(output_root);
+	auto coordinator_plan = ExtractPhysicalPlan(coordinator, CopyRangeSQL(output_root, 0, 37, false));
+	Check(coordinator_plan->Root().type == PhysicalOperatorType::COPY_TO_FILE,
+	      "Vortex distributed write did not plan a COPY_TO_FILE root");
+	auto &copy_root = coordinator_plan->Root().Cast<PhysicalCopyToFile>();
+	Check(copy_root.function.name == "vortex", "Vortex distributed write planned the wrong COPY function");
+	Check(copy_root.function.serialize && copy_root.function.deserialize,
+	      "Vortex distributed COPY bind serde is not registered");
+	Check(copy_root.function.copy_to_get_written_statistics,
+	      "Vortex distributed COPY written statistics callback is not registered");
+	Check(copy_root.return_type == CopyFunctionReturnType::CHANGED_ROWS,
+	      "ordinary Vortex write_file planning unexpectedly requested worker statistics");
+	Check(copy_root.bind_data != nullptr && copy_root.bind_data->Copy() != nullptr,
+	      "Vortex distributed COPY bind clone returned null");
+
+	distributed::PlanConfig config;
+	config.db = coordinator_database.instance;
+	config.config =
+	    std::make_shared<distributed::DuckDBExecutionConfig>(distributed::DuckDBExecutionConfig::from_env());
+	auto translated = distributed::physical_plan_to_pipeline_node(config, coordinator_plan, coordinator.context.get());
+	if (translated.is_err()) {
+		throw std::runtime_error("Vortex distributed COPY translation failed: " + string(translated.error().what()));
+	}
+	auto copy_finish = std::dynamic_pointer_cast<distributed::CopyFinishNode>(translated.value()->inner());
+	Check(copy_finish != nullptr, "Vortex distributed COPY did not translate to CopyFinish");
+	Check(copy_finish->staging_root_base().empty(), "shared POSIX COPY did not select direct-write mode");
+	auto spec = copy_finish->spec().Clone();
+	Check(spec.bind_data != nullptr, "Vortex distributed COPY spec bind clone returned null");
+	Check(spec.return_type == CopyFunctionReturnType::CHANGED_ROWS,
+	      "Vane changed the coordinator-facing Vortex COPY return type during translation");
+	const auto run_id = copy_finish->staging_run_id();
+	Check(!run_id.empty(), "Vortex distributed COPY did not allocate an attempt run id");
+	Check(distributed::WriteDistributedCopyDirectWriteLifecycle(fs, spec.file_path, run_id).is_ok(),
+	      "failed to register the Vortex direct-write lifecycle");
+
+	// Each worker plan is serialized through a short-lived DuckDB connection.
+	// Paths are assigned only after deserialization, matching the Vane worker
+	// lifecycle and proving the bind does not retain coordinator/runtime state.
+	auto first_partition_source = ExtractPhysicalPlan(coordinator, CopyRangeSQL(output_root, 0, 19));
+	auto second_partition_source = ExtractPhysicalPlan(coordinator, CopyRangeSQL(output_root, 19, 37));
+	auto failed_path = BuildCopyAttemptPath(fs, spec, run_id, "w_partition0_attempt0");
+	auto retry_path = BuildCopyAttemptPath(fs, spec, run_id, "w_partition0_attempt1");
+	auto second_path = BuildCopyAttemptPath(fs, spec, run_id, "w_partition1_attempt0");
+	auto abandoned_path = BuildCopyAttemptPath(fs, spec, run_id, "w_partition1_abandoned");
+	set<string> attempt_paths {failed_path.string(), retry_path.string(), second_path.string(),
+	                           abandoned_path.string()};
+	Check(attempt_paths.size() == 4, "Vortex COPY worker attempt paths collided");
+
+	auto failed_plan = CloneCopyAttemptPlan(first_partition_source, failed_path);
+	auto retry_plan = CloneCopyAttemptPlan(first_partition_source, retry_path);
+	auto second_plan = CloneCopyAttemptPlan(second_partition_source, second_path);
+	{
+		auto abandoned_plan = CloneCopyAttemptPlan(second_partition_source, abandoned_path);
+		Check(abandoned_plan != nullptr, "abandoned Vortex COPY task had no worker plan");
+	}
+	first_partition_source.reset();
+	second_partition_source.reset();
+	Check(!fs.FileExists(abandoned_path.string()), "cloning a Vortex COPY plan opened its output early");
+
+	DuckDB failed_worker_database(nullptr);
+	DuckDB retry_worker_database(nullptr);
+	DuckDB second_worker_database(nullptr);
+	Connection failed_worker(failed_worker_database);
+	Connection retry_worker(retry_worker_database);
+	Connection second_worker(second_worker_database);
+	bool injected_failure_observed = false;
+	try {
+		(void)ExecuteCopyAttempt(failed_worker, std::move(failed_plan), failed_path, 19,
+		                         "test:vortex-copy-failed-attempt");
+		throw std::runtime_error("injected task failure after Vortex artifact close");
+	} catch (const std::exception &error) {
+		if (!StringUtil::Contains(error.what(), "injected task failure")) {
+			throw;
+		}
+		injected_failure_observed = true;
+	}
+	Check(injected_failure_observed && fs.FileExists(failed_path.string()),
+	      "injected Vortex COPY failure did not retain its immutable attempt "
+	      "artifact");
+	auto first_selected =
+	    ExecuteCopyAttempt(retry_worker, std::move(retry_plan), retry_path, 19, "test:vortex-copy-retry-attempt");
+	auto second_selected =
+	    ExecuteCopyAttempt(second_worker, std::move(second_plan), second_path, 18, "test:vortex-copy-second-partition");
+
+	std::vector<distributed::DistributedCopyFileInfo> selected_files;
+	selected_files.push_back(std::move(first_selected));
+	selected_files.push_back(std::move(second_selected));
+	auto finalize_res =
+	    distributed::FinalizeCopyFiles(spec, "", std::move(selected_files), *coordinator.context, run_id);
+	if (finalize_res.is_err()) {
+		throw std::runtime_error("Vortex distributed COPY finalize failed: " + string(finalize_res.error().what()));
+	}
+	auto finalized = std::move(finalize_res).value();
+	Check(finalized.output_direct_write && finalized.output_committed && !finalized.output_outcome_unknown,
+	      "Vortex distributed COPY did not publish a known committed result");
+	Check(finalized.rows_copied == 37 && finalized.files.size() == 2,
+	      "Vortex distributed COPY committed the wrong file or row count");
+	Check(!fs.FileExists(failed_path.string()), "Vane did not remove the unselected Vortex retry artifact");
+	Check(!fs.FileExists(abandoned_path.string()), "Vane created an artifact for an abandoned Vortex plan");
+	Check(fs.FileExists(finalized.output_manifest_path) && fs.FileExists(finalized.output_committed_marker_path),
+	      "Vane did not publish the Vortex manifest and committed marker");
+
+	set<string> expected_selected_paths {retry_path.string(), second_path.string()};
+	set<string> committed_paths;
+	for (const auto &file : finalized.files) {
+		committed_paths.insert(file.final_path);
+		Check(file.final_path == file.staging_path, "Vane moved a direct-write Vortex artifact");
+	}
+	Check(committed_paths == expected_selected_paths, "the committed Vortex manifest selected the wrong task attempts");
+	CheckVortexDataset(coordinator, finalized.files, 37, 666, 0, 36, "distributed COPY");
+
+	auto committed_res = distributed::ReadCommittedDistributedCopyDirectWriteResult(fs, spec.file_path, run_id);
+	if (committed_res.is_err()) {
+		throw std::runtime_error("Vortex committed manifest read failed: " + string(committed_res.error().what()));
+	}
+	auto committed = std::move(committed_res).value();
+	Check(committed.rows_copied == 37 && committed.files.size() == 2,
+	      "reading the Vortex committed manifest changed its result");
+	set<string> manifest_paths;
+	for (const auto &file : committed.files) {
+		manifest_paths.insert(file.final_path);
+	}
+	Check(manifest_paths == expected_selected_paths,
+	      "the committed Vortex manifest retained an unselected task attempt");
+	CheckVortexDataset(coordinator, committed.files, 37, 666, 0, 36, "committed manifest");
+	auto replay_res = distributed::FinalizeCopyFiles(spec, "", {}, *coordinator.context, run_id);
+	Check(replay_res.is_ok() && replay_res.value().output_committed && replay_res.value().rows_copied == 37,
+	      "replaying Vortex coordinator finalize was not idempotent");
+
+	// Empty input still owns one valid attempt file and publishes it through the
+	// same manifest/marker protocol.
+	auto empty_root = temp.path / "empty-output";
+	std::filesystem::create_directories(empty_root);
+	auto empty_spec = spec.Clone();
+	empty_spec.file_path = empty_root.string();
+	const string empty_run_id = "empty-run";
+	Check(distributed::WriteDistributedCopyDirectWriteLifecycle(fs, empty_spec.file_path, empty_run_id).is_ok(),
+	      "failed to register empty Vortex COPY lifecycle");
+	auto empty_source = ExtractPhysicalPlan(coordinator, CopyRangeSQL(empty_root, 0, 0));
+	auto empty_path = BuildCopyAttemptPath(fs, empty_spec, empty_run_id, "w_empty_attempt0");
+	auto empty_plan = CloneCopyAttemptPlan(empty_source, empty_path);
+	empty_source.reset();
+	DuckDB empty_worker_database(nullptr);
+	Connection empty_worker(empty_worker_database);
+	auto empty_info =
+	    ExecuteCopyAttempt(empty_worker, std::move(empty_plan), empty_path, 0, "test:vortex-copy-empty-attempt");
+	std::vector<distributed::DistributedCopyFileInfo> empty_files;
+	empty_files.push_back(std::move(empty_info));
+	auto empty_finalize_res =
+	    distributed::FinalizeCopyFiles(empty_spec, "", std::move(empty_files), *coordinator.context, empty_run_id);
+	if (empty_finalize_res.is_err()) {
+		throw std::runtime_error("empty Vortex distributed COPY finalize failed: " +
+		                         string(empty_finalize_res.error().what()));
+	}
+	auto empty_finalized = std::move(empty_finalize_res).value();
+	Check(empty_finalized.output_committed && empty_finalized.rows_copied == 0 && empty_finalized.files.size() == 1,
+	      "empty Vortex distributed COPY did not commit one zero-row artifact");
+	auto empty_committed_res =
+	    distributed::ReadCommittedDistributedCopyDirectWriteResult(fs, empty_spec.file_path, empty_run_id);
+	if (empty_committed_res.is_err()) {
+		throw std::runtime_error("empty Vortex committed manifest read failed: " +
+		                         string(empty_committed_res.error().what()));
+	}
+	auto empty_committed = std::move(empty_committed_res).value();
+	Check(empty_committed.rows_copied == 0 && empty_committed.files.size() == 1 &&
+	          empty_committed.files[0].final_path == empty_path.string(),
+	      "empty Vortex committed manifest changed its zero-row artifact");
+	CheckEmptyVortexDataset(coordinator, empty_committed.files, "empty committed manifest");
+
+	// Before publication, a failed run can be cleaned completely and retried
+	// under a fresh run/attempt identity. A committed retry is then protected
+	// from the same cleanup operation.
+	auto cleanup_root = temp.path / "cleanup-output";
+	std::filesystem::create_directories(cleanup_root);
+	auto cleanup_spec = spec.Clone();
+	cleanup_spec.file_path = cleanup_root.string();
+	const string failed_run_id = "prepublication-failed-run";
+	const string retry_run_id = "prepublication-retry-run";
+	auto cleanup_source = ExtractPhysicalPlan(coordinator, CopyRangeSQL(cleanup_root, 0, 3));
+	auto cleanup_path = BuildCopyAttemptPath(fs, cleanup_spec, failed_run_id, "w_failed_attempt0");
+	auto cleanup_retry_path = BuildCopyAttemptPath(fs, cleanup_spec, retry_run_id, "w_retry_attempt0");
+	auto cleanup_plan = CloneCopyAttemptPlan(cleanup_source, cleanup_path);
+	auto cleanup_retry_plan = CloneCopyAttemptPlan(cleanup_source, cleanup_retry_path);
+	cleanup_source.reset();
+	Check(distributed::WriteDistributedCopyDirectWriteLifecycle(fs, cleanup_spec.file_path, failed_run_id).is_ok(),
+	      "failed to register pre-publication Vortex lifecycle");
+	DuckDB cleanup_worker_database(nullptr);
+	Connection cleanup_worker(cleanup_worker_database);
+	(void)ExecuteCopyAttempt(cleanup_worker, std::move(cleanup_plan), cleanup_path, 3,
+	                         "test:vortex-copy-prepublication-failure");
+	auto cleanup_commit_paths =
+	    distributed::BuildDistributedCopyFinalizeCommitPaths(fs, cleanup_spec.file_path, failed_run_id);
+	auto cleanup_res =
+	    distributed::CleanupDistributedCopyUncommittedDirectWriteRun(fs, cleanup_spec.file_path, failed_run_id);
+	Check(cleanup_res.is_ok() && !cleanup_res.value().skipped_committed,
+	      "pre-publication Vortex cleanup did not complete");
+	Check(!fs.FileExists(cleanup_path.string()) && !fs.DirectoryExists(cleanup_commit_paths.commit_dir),
+	      "pre-publication Vortex cleanup retained run-owned state");
+
+	Check(distributed::WriteDistributedCopyDirectWriteLifecycle(fs, cleanup_spec.file_path, retry_run_id).is_ok(),
+	      "failed to register pre-publication Vortex retry lifecycle");
+	auto cleanup_retry_info = ExecuteCopyAttempt(cleanup_worker, std::move(cleanup_retry_plan), cleanup_retry_path, 3,
+	                                             "test:vortex-copy-prepublication-retry");
+	std::vector<distributed::DistributedCopyFileInfo> cleanup_retry_files;
+	cleanup_retry_files.push_back(std::move(cleanup_retry_info));
+	auto cleanup_retry_finalize = distributed::FinalizeCopyFiles(cleanup_spec, "", std::move(cleanup_retry_files),
+	                                                             *coordinator.context, retry_run_id);
+	Check(cleanup_retry_finalize.is_ok() && cleanup_retry_finalize.value().output_committed,
+	      "pre-publication Vortex retry did not commit");
+	CheckVortexDataset(coordinator, cleanup_retry_finalize.value().files, 3, 3, 0, 2, "pre-publication retry");
+	auto committed_cleanup =
+	    distributed::CleanupDistributedCopyUncommittedDirectWriteRun(fs, cleanup_spec.file_path, retry_run_id);
+	Check(committed_cleanup.is_ok() && committed_cleanup.value().skipped_committed &&
+	          fs.FileExists(cleanup_retry_path.string()),
+	      "cleanup removed a committed Vortex retry");
+
+	// Once a manifest exists without a marker, publication outcome is not
+	// inferred from attempt files. Preserve both for diagnosis until an explicit
+	// coordinator reconciliation proves the run uncommitted and requests cleanup.
+	auto uncertain_root = temp.path / "uncertain-output";
+	std::filesystem::create_directories(uncertain_root);
+	auto uncertain_spec = spec.Clone();
+	uncertain_spec.file_path = uncertain_root.string();
+	const string uncertain_run_id = "uncertain-publication-run";
+	Check(distributed::WriteDistributedCopyDirectWriteLifecycle(fs, uncertain_spec.file_path, uncertain_run_id).is_ok(),
+	      "failed to register uncertain-publication Vortex lifecycle");
+	auto uncertain_source = ExtractPhysicalPlan(coordinator, CopyRangeSQL(uncertain_root, 0, 2));
+	auto uncertain_path = BuildCopyAttemptPath(fs, uncertain_spec, uncertain_run_id, "w_uncertain_attempt0");
+	auto uncertain_plan = CloneCopyAttemptPlan(uncertain_source, uncertain_path);
+	uncertain_source.reset();
+	auto uncertain_info = ExecuteCopyAttempt(cleanup_worker, std::move(uncertain_plan), uncertain_path, 2,
+	                                         "test:vortex-copy-uncertain-publication");
+	uncertain_info.final_path = uncertain_info.staging_path;
+	std::vector<distributed::DistributedCopyFileInfo> uncertain_files;
+	uncertain_files.push_back(std::move(uncertain_info));
+	auto uncertain_paths =
+	    distributed::BuildDistributedCopyFinalizeCommitPaths(fs, uncertain_spec.file_path, uncertain_run_id);
+	Check(distributed::WriteDistributedCopyFinalizeManifest(fs, uncertain_paths, uncertain_spec.file_path,
+	                                                        "direct:" + uncertain_run_id, uncertain_files)
+	          .is_ok(),
+	      "failed to inject an uncertain Vortex publication");
+	Check(fs.FileExists(uncertain_path.string()) && fs.FileExists(uncertain_paths.manifest_path) &&
+	          !fs.FileExists(uncertain_paths.committed_marker_path),
+	      "uncertain Vortex publication did not retain its diagnostic state");
+	auto uncertain_committed =
+	    distributed::ReadCommittedDistributedCopyDirectWriteResult(fs, uncertain_spec.file_path, uncertain_run_id);
+	Check(uncertain_committed.is_err(), "Vane inferred a committed Vortex dataset without a marker");
+	auto uncertain_inspection =
+	    distributed::InspectDistributedCopyDirectWriteRun(fs, uncertain_spec.file_path, uncertain_run_id);
+	Check(uncertain_inspection.is_ok() &&
+	          uncertain_inspection.value().state == distributed::DistributedCopyDirectWriteRunState::UNCOMMITTED,
+	      "Vane did not expose the uncertain Vortex run for reconciliation");
+	auto uncertain_cleanup =
+	    distributed::CleanupDistributedCopyUncommittedDirectWriteRun(fs, uncertain_spec.file_path, uncertain_run_id);
+	Check(uncertain_cleanup.is_ok() && !uncertain_cleanup.value().skipped_committed &&
+	          !fs.FileExists(uncertain_path.string()) && !fs.DirectoryExists(uncertain_paths.commit_dir),
+	      "explicit reconciliation did not clean the uncommitted Vortex run");
 }
 
 unique_ptr<PhysicalPlan> RebuildAssignedPlan(DuckDB &database, const distributed::DuckPhysicalPlanRef &source,
@@ -1028,11 +1434,12 @@ void TestProtocol() {
 
 int main() {
 	try {
+		TestWriteProtocol();
 		TestProtocol();
-		std::cout << "Vortex distributed scan protocol test passed" << std::endl;
+		std::cout << "Vortex distributed scan/write protocol test passed" << std::endl;
 		return 0;
 	} catch (const std::exception &error) {
-		std::cerr << "Vortex distributed scan protocol test failed: " << error.what() << std::endl;
+		std::cerr << "Vortex distributed scan/write protocol test failed: " << error.what() << std::endl;
 		return 1;
 	}
 }

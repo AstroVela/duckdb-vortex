@@ -92,11 +92,12 @@ source revision, distributed headers, or required build inputs are absent.
 The Vane lane selects `vortex-extension-vane/Cargo.toml`; the ordinary lane
 continues to select `vortex-extension/Cargo.toml`. The Vane manifest pins the
 companion adapter commit
-`AstroVela/vortex@4aa457a61aad05364fcbb3b4ae16e71e2add0e23`, based on the same
+`AstroVela/vortex@ff6e20aed283bf6e8e6b6f6d006f97bf5c33eb80`, based on the same
 `vortex-data/vortex@7e06a99bb7772087c9546137ea6f4593235426a6` revision used by
-the native manifest. CMake explicitly sets `VORTEX_VANE_DISTRIBUTED=1` only
-for this lane; both Rust adapters translate it to
-`#[cfg(vortex_vane_distributed)]`, while C++ uses the matching
+the native manifest. The manifest also pins
+`AstroVela/vane@3247ba7b0079b82a91887bbacc7e17bfcec8dae2`. CMake explicitly
+sets `VORTEX_VANE_DISTRIBUTED=1` only for this lane; both Rust adapters
+translate it to `#[cfg(vortex_vane_distributed)]`, while C++ uses the matching
 `VORTEX_VANE_DISTRIBUTED` definition. No ordinary DuckDB source, submodule,
 manifest, or registration path is replaced.
 
@@ -104,7 +105,7 @@ The Vane loader calls one exported Rust shim for both runtime initialization
 and catalog registration. The companion C++ registrar remains internal to the
 Rust artifact, so the same entry point works with staticlib and cdylib builds.
 
-### Vane distributed Vortex scans
+### Vane distributed Vortex scans and COPY
 
 Vane registers distributed callbacks for both `read_vortex` and
 `vortex_scan`, including the `VARCHAR` and `LIST<VARCHAR>` overloads. Planning
@@ -123,13 +124,27 @@ combined by this protocol. Empty scans and empty worker assignments are valid.
 Vortex late materialization is disabled in Vane builds because its second scan
 would require coupled split assignment.
 
-The current scope is deliberately limited to distributed reads:
+The file-oriented write path uses DuckDB's normal `COPY ... (FORMAT VORTEX)`
+plan, including `relation.write_file(..., format="vortex")`. The Vane-only bind
+clone and serializer carry owned column names and logical types. After worker
+plan deserialization, Vane assigns a unique run/task/attempt path; the Vortex
+writer opens that actual path in `init_global` and returns the exact path, row
+count, and closed-file byte size. No writer, stream, filesystem, or execution
+context is serialized.
 
-| Capability | Issue #4 behavior |
+Workers only create immutable attempt artifacts. The coordinator selects one
+successful attempt per partition, records only those files in the manifest,
+removes visible unselected attempts, and writes the committed marker last. The
+marker is the authoritative publication boundary; readers must never infer a
+committed dataset from files visible under the output prefix. Empty input
+publishes a valid readable zero-row Vortex file through the same protocol.
+
+| Capability | Vane behavior |
 | --- | --- |
 | Distributed `read_vortex` / `vortex_scan` | Enabled |
 | Local `COPY ... (FORMAT VORTEX)` | Enabled |
-| Distributed Vortex COPY | Not registered; tracked by #6 |
+| Distributed Vortex COPY on shared POSIX storage | Enabled |
+| Object-store distributed Vortex COPY | Not implemented; tracked by #8 |
 | Sub-file/row-group splitting | Not implemented; tracked by #9 |
 
 Worker metadata checks and every subsequent range read are pinned to the
@@ -140,19 +155,32 @@ nor an ETag is rejected during bind, with no path-and-size fallback. Every
 worker must be able to access the same canonical URLs with equivalent
 credentials.
 
+The current COPY MVP requires every worker and the coordinator to see the same
+POSIX output namespace. Before publication, a failed run can be cleaned and
+retried under a fresh run/attempt identity. Once manifest publication has
+started, automatic failure handling retains artifacts for diagnosis; an
+explicit coordinator reconciliation may remove them only after proving that no
+committed marker exists. A committed run is never removed by uncommitted-run
+cleanup, and coordinator-finalize replay reads the existing manifest
+idempotently.
+
 Run the focused protocol and lifecycle qualification under ASAN/LSAN with:
 
 ```sh
 make vane_scan_lifecycle VANE_BUILD_JOBS=8
 ```
 
-This Vane-only target uses a separate Debug build directory. It repeatedly
-serializes and reconstructs assigned plans through short-lived connections,
-destroys an assigned plan to model a lost task, replays it in a fresh worker
-context, executes the same prepared worker plan twice, and distributes file
-assignments across independent DuckDB instances. ASAN and LSAN fail the target
-on use-after-free, invalid destruction, or leaked lifecycle state. The hosted
-Vane workflow runs the same target in a dedicated read-only CI job.
+This Vane-only target uses a separate Debug build directory. Its scan cases
+repeatedly serialize and reconstruct assigned plans through short-lived
+connections, destroy an assigned plan to model a lost task, replay it in a
+fresh worker context, execute the same prepared worker plan twice, and
+distribute file assignments across independent DuckDB instances. Its COPY
+cases exercise transient-context plan cloning, independent workers, injected
+failure and retry, winner/loser selection, exact statistics, committed-manifest
+readback, empty output, pre-publication cleanup, and conservative uncertain
+publication handling. ASAN and LSAN fail the target on use-after-free, invalid
+destruction, or leaked lifecycle state. The hosted Vane workflow runs the same
+target in a dedicated read-only CI job.
 
 ## Running the extension
 
