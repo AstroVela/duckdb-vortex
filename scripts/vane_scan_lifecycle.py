@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and run the Vane Vortex scan lifecycle test under ASAN/LSAN."""
+"""Build and run the Vane Vortex scan/write lifecycle test under ASAN/LSAN."""
 
 from __future__ import annotations
 
@@ -240,7 +240,7 @@ def main() -> int:
 
     test_binary = require_file(
         runtime_dir / "vortex_distributed_protocol_test",
-        "Vane Vortex lifecycle test",
+        "Vane Vortex scan/write lifecycle test",
     )
     dynamic_dependencies = run(
         ["readelf", "--dynamic", str(test_binary)],
@@ -262,7 +262,7 @@ def main() -> int:
     test_env["LSAN_OPTIONS"] = "exitcode=23:report_objects=1:print_suppressions=0"
     test_env["RUST_BACKTRACE"] = "1"
     run([str(test_binary)], cwd=extension_root, env=test_env)
-    print("Vane Vortex ASAN/LSAN lifecycle qualification passed")
+    print("Vane Vortex scan/write ASAN/LSAN lifecycle qualification passed")
     return 0
 
 

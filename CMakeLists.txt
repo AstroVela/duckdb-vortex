@@ -75,9 +75,13 @@ set(VORTEX_RUST_MANIFEST vortex-extension/Cargo.toml)
 if(VORTEX_VANE_DISTRIBUTED)
     if(NOT EXISTS
        "${DUCKDB_MODULE_BASE_DIR}/src/include/duckdb/function/distributed_table_function.hpp"
+       OR NOT EXISTS
+          "${DUCKDB_MODULE_BASE_DIR}/src/include/duckdb/execution/distributed/copy_to_file.hpp"
+       OR NOT EXISTS
+          "${DUCKDB_MODULE_BASE_DIR}/src/include/duckdb/execution/distributed/copy_finalize.hpp"
     )
         message(FATAL_ERROR
-                "VORTEX_VANE_DISTRIBUTED requires Vane distributed scan support"
+                "VORTEX_VANE_DISTRIBUTED requires Vane distributed scan/COPY support"
         )
     endif()
     set(VORTEX_RUST_MANIFEST vortex-extension-vane/Cargo.toml)
@@ -142,7 +146,7 @@ install(
 )
 
 option(BUILD_VORTEX_DISTRIBUTED_TESTS
-       "Build the Vane distributed Vortex scan protocol test" OFF)
+       "Build the Vane distributed Vortex scan and COPY protocol test" OFF)
 if(BUILD_VORTEX_DISTRIBUTED_TESTS)
     if(NOT VORTEX_VANE_DISTRIBUTED)
         message(FATAL_ERROR

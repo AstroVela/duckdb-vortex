@@ -18,5 +18,5 @@ endif()
 set(VORTEX_VANE_DISTRIBUTED ON CACHE BOOL
     "Build Vane distributed Vortex support" FORCE)
 set(BUILD_VORTEX_DISTRIBUTED_TESTS ON CACHE BOOL
-    "Build the Vane distributed Vortex scan protocol test" FORCE)
+    "Build the Vane distributed Vortex scan and COPY protocol test" FORCE)
 include(${CMAKE_CURRENT_LIST_DIR}/extension_config.cmake)
