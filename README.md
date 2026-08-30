@@ -92,7 +92,7 @@ source revision, distributed headers, or required build inputs are absent.
 The Vane lane selects `vortex-extension-vane/Cargo.toml`; the ordinary lane
 continues to select `vortex-extension/Cargo.toml`. The Vane manifest pins the
 companion adapter commit
-`AstroVela/vortex@1726615c7107e2b5e461c5a8767f682a4a02164f`, based on the same
+`AstroVela/vortex@59da225f87a1e71332cbd3ee808bf53759bd7755`, based on the same
 `vortex-data/vortex@7e06a99bb7772087c9546137ea6f4593235426a6` revision used by
 the native manifest. CMake explicitly sets `VORTEX_VANE_DISTRIBUTED=1` only
 for this lane. No ordinary DuckDB source, submodule, manifest, or registration
@@ -107,8 +107,9 @@ serializes that state for workers, and creates one split per bound file. A
 worker opens exactly the files named by its assigned splits; it never expands
 the original path or glob again. The split identity includes the scan UUID,
 stable file index, canonical source URL and object path, and the file's byte
-length. A missing file, changed byte length, duplicate split, unknown split,
-foreign scan UUID, or non-canonical payload fails the query.
+length plus its storage ETag and/or object version. A missing file, changed
+object identity or byte length, duplicate split, unknown split, foreign scan
+UUID, or non-canonical payload fails the query.
 
 A fully pushed-down final aggregate is planned as one indivisible split over
 the complete pruned file set because independent final aggregates cannot be
@@ -125,11 +126,13 @@ The current scope is deliberately limited to distributed reads:
 | Distributed Vortex COPY | Not registered; tracked by #6 |
 | Sub-file/row-group splitting | Not implemented; tracked by #9 |
 
-The reader API does not expose an immutable object-version or content hash, so
-a same-path, same-size in-place rewrite cannot be detected. Distributed inputs
-must therefore remain immutable, or use versioned/content-addressed paths, for
-the lifetime of planning and retries. Every worker must be able to access the
-same canonical URLs with equivalent credentials.
+Worker metadata checks and every subsequent range read are pinned to the
+coordinator-selected identity. Versioned stores read the selected object
+version; ETag-protected stores reject an identity-changing replacement even
+when its byte length is unchanged. A backend that provides neither a version
+nor an ETag is rejected during bind, with no path-and-size fallback. Every
+worker must be able to access the same canonical URLs with equivalent
+credentials.
 
 To build and run the focused protocol executable after the Vane-native build:
 

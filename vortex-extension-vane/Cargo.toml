@@ -13,7 +13,7 @@ path = "src/lib.rs"
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
-vortex-duckdb = { git = "https://github.com/AstroVela/vortex.git", rev = "1726615c7107e2b5e461c5a8767f682a4a02164f" }
+vortex-duckdb = { git = "https://github.com/AstroVela/vortex.git", rev = "59da225f87a1e71332cbd3ee808bf53759bd7755" }
 
 [features]
 vane = []

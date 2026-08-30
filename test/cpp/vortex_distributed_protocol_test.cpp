@@ -17,7 +17,6 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <set>
 #include <stdexcept>
@@ -613,25 +612,30 @@ void TestProtocol() {
 	Check(StringUtil::Contains(missing_file_error, "no longer exists"),
 	      "missing bound Vortex file did not fail with an identity error: " + missing_file_error);
 
-	// The public Vortex listing gives us a stable path and byte length, but no
-	// snapshot or object-version token. At minimum, retries must reject a file
-	// whose length no longer matches the coordinator's immutable bind.
-	auto original_file_size = std::filesystem::file_size(files[0]);
-	{
-		std::ofstream changed_file(files[0], std::ios::binary | std::ios::app);
-		Check(changed_file.good(), "failed to open a bound Vortex file for the size-change test");
-		changed_file.put('\0');
-		Check(changed_file.good(), "failed to extend a bound Vortex file for the size-change test");
-	}
-	string changed_file_error;
+	// Replacing a bound object with a new generation must fail even when its
+	// path and byte length are unchanged. The replacement intentionally has
+	// identical bytes: generation identity, rather than an observed size or a
+	// coincidental content match, owns the worker read.
+	auto original_file = files[0];
+	auto saved_file = original_file;
+	saved_file += ".bound-original";
+	auto replacement_file = original_file;
+	replacement_file += ".same-size-replacement";
+	std::filesystem::copy_file(original_file, replacement_file);
+	Check(std::filesystem::file_size(original_file) == std::filesystem::file_size(replacement_file),
+	      "same-size replacement changed the bound Vortex file length");
+	std::filesystem::rename(original_file, saved_file);
+	std::filesystem::rename(replacement_file, original_file);
+	string replaced_file_error;
 	try {
 		(void)ExecuteAssigned(planned, worker, first_batch, 175);
 	} catch (const std::exception &error) {
-		changed_file_error = error.what();
+		replaced_file_error = error.what();
 	}
-	std::filesystem::resize_file(files[0], original_file_size);
-	Check(StringUtil::Contains(changed_file_error, "size changed"),
-	      "changed bound Vortex file did not fail with an identity error: " + changed_file_error);
+	std::filesystem::remove(original_file);
+	std::filesystem::rename(saved_file, original_file);
+	Check(StringUtil::Contains(replaced_file_error, "precondition failure"),
+	      "same-size replacement did not fail with an object-version error: " + replaced_file_error);
 
 	vector<ResultRow> distributed_rows;
 	for (idx_t split_index = 0; split_index < planned.splits.size(); split_index++) {
