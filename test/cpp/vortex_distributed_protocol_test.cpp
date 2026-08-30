@@ -219,8 +219,8 @@ void ApplySplitBatch(PhysicalPlan &plan, idx_t scan_node_id, const distributed::
 	      "applied Vortex split batch did not validate: " + error);
 }
 
-unique_ptr<QueryResult> ExecutePlan(Connection &worker, unique_ptr<PhysicalPlan> plan, const vector<LogicalType> &types,
-                                    const vector<string> &names, const string &label) {
+shared_ptr<PreparedStatementData> PreparePlan(unique_ptr<PhysicalPlan> plan, const vector<LogicalType> &types,
+                                              const vector<string> &names) {
 	auto prepared = make_shared_ptr<PreparedStatementData>(StatementType::SELECT_STATEMENT);
 	prepared->names = names;
 	prepared->types = types;
@@ -228,6 +228,11 @@ unique_ptr<QueryResult> ExecutePlan(Connection &worker, unique_ptr<PhysicalPlan>
 	prepared->output_type = QueryResultOutputType::FORCE_MATERIALIZED;
 	prepared->memory_type = QueryResultMemoryType::IN_MEMORY;
 	prepared->physical_plan = std::move(plan);
+	return prepared;
+}
+
+unique_ptr<QueryResult> ExecutePreparedPlan(Connection &worker, shared_ptr<PreparedStatementData> prepared,
+                                            const string &label) {
 	PendingQueryParameters parameters;
 	auto pending = worker.context->PendingQueryPreparedStatementNoRebind(label, prepared, parameters);
 	Check(pending != nullptr, "worker returned no pending query");
@@ -235,6 +240,31 @@ unique_ptr<QueryResult> ExecutePlan(Connection &worker, unique_ptr<PhysicalPlan>
 		throw std::runtime_error("worker rejected physical plan: " + pending->GetError());
 	}
 	return pending->Execute();
+}
+
+unique_ptr<QueryResult> ExecutePlan(Connection &worker, unique_ptr<PhysicalPlan> plan, const vector<LogicalType> &types,
+                                    const vector<string> &names, const string &label) {
+	return ExecutePreparedPlan(worker, PreparePlan(std::move(plan), types, names), label);
+}
+
+unique_ptr<PhysicalPlan> RebuildAssignedPlan(DuckDB &database, const distributed::DuckPhysicalPlanRef &source,
+                                             const distributed::ScanSplitBatch &batch, idx_t scan_node_id,
+                                             idx_t reconstruction_count) {
+	Check(reconstruction_count > 0, "Vortex lifecycle reconstruction count must be positive");
+	auto current = source;
+	for (idx_t reconstruction = 0; reconstruction < reconstruction_count; reconstruction++) {
+		unique_ptr<PhysicalPlan> rebuilt;
+		{
+			Connection transient_reconstruction(database);
+			rebuilt = ClonePlan(current, transient_reconstruction, scan_node_id);
+			ApplySplitBatch(*rebuilt, scan_node_id, batch);
+		}
+		if (reconstruction + 1 == reconstruction_count) {
+			return rebuilt;
+		}
+		current = distributed::DuckPhysicalPlanRef(rebuilt.release());
+	}
+	throw std::runtime_error("Vortex lifecycle reconstruction produced no worker plan");
 }
 
 vector<ResultRow> ExecuteAssigned(const PlannedScan &planned, Connection &worker,
@@ -919,6 +949,79 @@ void TestProtocol() {
 	auto first_retry = ExecuteAssigned(planned, worker, valid_batch, 600);
 	auto second_retry = ExecuteAssigned(planned, worker, valid_batch, 601);
 	Check(first_retry == second_retry, "repeated Vortex split changed meaning");
+
+	// Destroy the coordinator database and connection before cloning or
+	// executing the portable worker template. Transport the complete assignment
+	// independently so no coordinator-owned split or bind runtime can survive by
+	// reference into the worker.
+	auto coordinator_destroyed_plan = [&]() {
+		DuckDB transient_coordinator_database(nullptr);
+		Connection transient_coordinator(transient_coordinator_database);
+		return PlanScan(transient_coordinator_database, transient_coordinator, scan_sql, 8, baseline_types,
+		                baseline_names);
+	}();
+	auto coordinator_destroyed_batch = distributed::ScanSplitBatch::DeserializeFromBytes(
+	    MakeSplitBatch(coordinator_destroyed_plan.splits).SerializeToBytes());
+	DuckDB coordinator_destroyed_worker_database(nullptr);
+	Connection coordinator_destroyed_worker(coordinator_destroyed_worker_database);
+	auto coordinator_destroyed_rows =
+	    ExecuteAssigned(coordinator_destroyed_plan, coordinator_destroyed_worker, coordinator_destroyed_batch, 625);
+	std::sort(coordinator_destroyed_rows.begin(), coordinator_destroyed_rows.end());
+	Check(coordinator_destroyed_rows == baseline_rows,
+	      "Vortex worker template retained coordinator-owned runtime state");
+
+	// Execute different assignments through independent DuckDB instances. This
+	// models workers that never share a ClientContext, filesystem, or Rust bind
+	// runtime while still consuming the same coordinator-owned plan template.
+	DuckDB first_worker_database(nullptr);
+	DuckDB second_worker_database(nullptr);
+	Connection first_worker(first_worker_database);
+	Connection second_worker(second_worker_database);
+	vector<ResultRow> independent_worker_rows;
+	for (idx_t split_index = 0; split_index < planned.splits.size(); split_index++) {
+		auto transported_batch = distributed::ScanSplitBatch::DeserializeFromBytes(
+		    MakeSplitBatch(planned.splits[split_index]).SerializeToBytes());
+		auto &selected_worker = split_index % 2 == 0 ? first_worker : second_worker;
+		auto rows = ExecuteAssigned(planned, selected_worker, transported_batch, 650 + split_index);
+		independent_worker_rows.insert(independent_worker_rows.end(), rows.begin(), rows.end());
+	}
+	std::sort(independent_worker_rows.begin(), independent_worker_rows.end());
+	Check(independent_worker_rows == baseline_rows,
+	      "independent Vortex worker contexts produced duplicate or missing rows");
+
+	// Repeatedly rebuild the assigned bind through transient connections, drop
+	// one assigned plan as a lost task, then execute the replay from a different
+	// connection. The final PreparedStatementData is executed twice to prove that
+	// execution state does not leak into the portable bind or mutate its
+	// assignment.
+	constexpr idx_t lifecycle_cycles = 8;
+	constexpr idx_t reconstructions_per_cycle = 3;
+	for (idx_t cycle = 0; cycle < lifecycle_cycles; cycle++) {
+		DuckDB lifecycle_database(nullptr);
+		auto transported_batch = distributed::ScanSplitBatch::DeserializeFromBytes(valid_batch.SerializeToBytes());
+		{
+			auto abandoned =
+			    RebuildAssignedPlan(lifecycle_database, planned.worker_plan, transported_batch, 700 + cycle, 1);
+			Check(abandoned != nullptr, "lost Vortex task did not contain an assigned worker plan");
+		}
+
+		auto replay_plan = RebuildAssignedPlan(lifecycle_database, planned.worker_plan, transported_batch, 800 + cycle,
+		                                       reconstructions_per_cycle);
+		Connection lifecycle_worker(lifecycle_database);
+		auto prepared = PreparePlan(std::move(replay_plan), planned.result_types, planned.result_names);
+		auto first_execution =
+		    ExecutePreparedPlan(lifecycle_worker, prepared, "test:vortex-lifecycle-first-" + std::to_string(cycle));
+		Check(first_execution != nullptr, "first repeated Vortex prepared execution returned no result");
+		auto first_rows = ReadRows(*first_execution);
+		first_execution.reset();
+		auto second_execution =
+		    ExecutePreparedPlan(lifecycle_worker, prepared, "test:vortex-lifecycle-second-" + std::to_string(cycle));
+		Check(second_execution != nullptr, "second repeated Vortex prepared execution returned no result");
+		auto second_rows = ReadRows(*second_execution);
+		Check(first_rows == first_retry && second_rows == first_retry,
+		      "replayed Vortex worker plan changed across repeated prepared "
+		      "execution");
+	}
 }
 
 } // namespace

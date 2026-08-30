@@ -48,3 +48,105 @@ jobs:
       manifest: vane-extension.toml
       build_jobs: 8
       run_native_tests: true
+
+  vane-scan-lifecycle:
+    name: Vane scan lifecycle (ASAN/LSAN)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      VANE_EXTENSION_ROOT: ${{ github.workspace }}/extension
+      VANE_MANIFEST: ${{ github.workspace }}/extension/vane-extension.toml
+      VANE_SOURCE_DIR: ${{ github.workspace }}/vane
+      VANE_SCAN_LIFECYCLE_BUILD_DIR: ${{ github.workspace }}/build/vane-scan-lifecycle
+      VANE_BUILD_JOBS: 8
+      VCPKG_TARGET_TRIPLET: x64-linux
+      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+      CCACHE_DIR: ${{ github.workspace }}/.cache/vane-scan-lifecycle-ccache
+      CCACHE_MAXSIZE: 750M
+      CCACHE_COMPILERCHECK: content
+      VANE_CMAKE_COMPILER_LAUNCHER: ccache
+
+    steps:
+      - name: Checkout extension and submodules
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: extension
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Read integration manifest
+        id: manifest
+        run: |
+          python extension/vane-extension-ci-tools/scripts/vane_extension.py \
+            --manifest "$VANE_MANIFEST" \
+            --extension-root "$VANE_EXTENSION_ROOT" \
+            manifest \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Install CMake, Ninja, and ccache
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ccache
+          python -m pip install "cmake>=3.29" "ninja>=1.10"
+
+      - name: Restore Vane lifecycle compiler cache
+        id: lifecycle_ccache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: vane-scan-lifecycle-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.manifest.outputs.vane_revision }}-${{ steps.manifest.outputs.vcpkg_revision }}-${{ hashFiles('extension/vortex-extension-vane/Cargo.lock') }}
+
+      - name: Reset Vane lifecycle compiler cache statistics
+        shell: bash
+        run: |
+          set -euo pipefail
+          ccache --zero-stats
+
+      - name: Set up vcpkg
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11.6
+        with:
+          vcpkgGitCommitId: ${{ steps.manifest.outputs.vcpkg_revision }}
+          vcpkgDirectory: ${{ github.workspace }}/vcpkg
+
+      - name: Remove verified run-vcpkg state marker
+        shell: bash
+        env:
+          VANE_VCPKG_REVISION: ${{ steps.manifest.outputs.vcpkg_revision }}
+          VANE_VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+        run: |
+          set -euo pipefail
+          marker="$VANE_VCPKG_ROOT/vcpkgLastBuiltCommitId"
+          test -f "$marker"
+          test ! -L "$marker"
+          test "$(wc -c < "$marker")" -eq 40
+          test "$(<"$marker")" = "$VANE_VCPKG_REVISION"
+          rm -- "$marker"
+          vcpkg_status="$(git -C "$VANE_VCPKG_ROOT" status --porcelain --untracked-files=all)"
+          test -z "$vcpkg_status"
+
+      - name: Run Vortex scan lifecycle under ASAN and LSAN
+        run: |
+          make -C extension vane_scan_lifecycle \
+            VANE_MANIFEST="$VANE_MANIFEST" \
+            VANE_SOURCE_DIR="$VANE_SOURCE_DIR" \
+            VANE_SCAN_LIFECYCLE_BUILD_DIR="$VANE_SCAN_LIFECYCLE_BUILD_DIR" \
+            VANE_BUILD_JOBS="$VANE_BUILD_JOBS" \
+            VCPKG_TOOLCHAIN_PATH="$VCPKG_TOOLCHAIN_PATH"
+
+      - name: Report Vane lifecycle compiler cache
+        if: always()
+        shell: bash
+        env:
+          VANE_CCACHE_ACTION_HIT: ${{ steps.lifecycle_ccache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          printf 'GitHub Actions ccache restore hit: %s\n' "${VANE_CCACHE_ACTION_HIT:-false}"
+          ccache --show-stats

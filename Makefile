@@ -20,6 +20,11 @@ include extension-ci-tools/makefiles/duckdb_extension.Makefile
 VANE_EXTENSION_MAKEFILE := $(PROJ_DIR)vane-extension-ci-tools/makefiles/vane_extension.Makefile
 VANE_EXTENSION_TARGETS := vane_verify_ci_tools vane_validate vane_prepare vane_identity \
 	vane_verify_vcpkg vane_native vane_ci vane_wheel_dependencies vane_wheel
+VANE_SOURCE_DIR ?= $(PROJ_DIR)build/vane-source
+VANE_MANIFEST ?= $(PROJ_DIR)vane-extension.toml
+VANE_SCAN_LIFECYCLE_BUILD_DIR ?= $(PROJ_DIR)build/vane-scan-lifecycle
+VANE_BUILD_JOBS ?= 8
+VANE_PYTHON ?= python3
 .PHONY: $(VANE_EXTENSION_TARGETS)
 
 $(VANE_EXTENSION_TARGETS):
@@ -29,3 +34,12 @@ $(VANE_EXTENSION_TARGETS):
 	}
 	+$(MAKE) --no-print-directory -f "$(VANE_EXTENSION_MAKEFILE)" "$@" \
 		VANE_EXTENSION_ROOT="$(abspath $(PROJ_DIR))"
+
+.PHONY: vane_scan_lifecycle
+vane_scan_lifecycle: vane_prepare
+	$(VANE_PYTHON) "$(PROJ_DIR)scripts/vane_scan_lifecycle.py" \
+		--extension-root "$(abspath $(PROJ_DIR))" \
+		--manifest "$(abspath $(VANE_MANIFEST))" \
+		--vane-source "$(abspath $(VANE_SOURCE_DIR))" \
+		--build-dir "$(abspath $(VANE_SCAN_LIFECYCLE_BUILD_DIR))" \
+		--jobs "$(VANE_BUILD_JOBS)"
