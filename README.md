@@ -92,7 +92,7 @@ source revision, distributed headers, or required build inputs are absent.
 The Vane lane selects `vortex-extension-vane/Cargo.toml`; the ordinary lane
 continues to select `vortex-extension/Cargo.toml`. The Vane manifest pins the
 companion adapter commit
-`AstroVela/vortex@090a557d0dc692dcd39b4b5823f2c06aa870fc83`, based on the same
+`AstroVela/vortex@4aa457a61aad05364fcbb3b4ae16e71e2add0e23`, based on the same
 `vortex-data/vortex@7e06a99bb7772087c9546137ea6f4593235426a6` revision used by
 the native manifest. CMake explicitly sets `VORTEX_VANE_DISTRIBUTED=1` only
 for this lane; both Rust adapters translate it to
