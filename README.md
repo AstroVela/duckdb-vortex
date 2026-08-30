@@ -140,12 +140,19 @@ nor an ETag is rejected during bind, with no path-and-size fallback. Every
 worker must be able to access the same canonical URLs with equivalent
 credentials.
 
-To build and run the focused protocol executable after the Vane-native build:
+Run the focused protocol and lifecycle qualification under ASAN/LSAN with:
 
 ```sh
-cmake --build build/vane-native --target vortex_distributed_protocol_test --parallel
-./build/vane-native/extension/vortex/vortex_distributed_protocol_test
+make vane_scan_lifecycle VANE_BUILD_JOBS=8
 ```
+
+This Vane-only target uses a separate Debug build directory. It repeatedly
+serializes and reconstructs assigned plans through short-lived connections,
+destroys an assigned plan to model a lost task, replays it in a fresh worker
+context, executes the same prepared worker plan twice, and distributes file
+assignments across independent DuckDB instances. ASAN and LSAN fail the target
+on use-after-free, invalid destruction, or leaked lifecycle state. The hosted
+Vane workflow runs the same target in a dedicated read-only CI job.
 
 ## Running the extension
 
