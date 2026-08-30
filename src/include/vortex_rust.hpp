@@ -8,11 +8,5 @@ const char *vortex_extension_version_rust();
 }
 
 #ifdef VORTEX_VANE_DISTRIBUTED
-extern "C" void vortex_init_vane_rust();
-
-namespace duckdb {
-class ExtensionLoader;
-}
-
-void vortex_vane_init(duckdb::ExtensionLoader &loader);
+extern "C" void vortex_init_vane_rust(void *loader);
 #endif

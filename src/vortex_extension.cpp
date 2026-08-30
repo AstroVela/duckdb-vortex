@@ -11,8 +11,7 @@ using namespace duckdb;
 
 #ifdef VORTEX_VANE_DISTRIBUTED
 static void LoadVane(ExtensionLoader &loader) {
-	vortex_init_vane_rust();
-	vortex_vane_init(loader);
+	vortex_init_vane_rust(&loader);
 }
 #endif
 

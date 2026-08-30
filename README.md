@@ -92,13 +92,17 @@ source revision, distributed headers, or required build inputs are absent.
 The Vane lane selects `vortex-extension-vane/Cargo.toml`; the ordinary lane
 continues to select `vortex-extension/Cargo.toml`. The Vane manifest pins the
 companion adapter commit
-`AstroVela/vortex@9f13e5f199b58c6221e71922280109d4efa6b648`, based on the same
+`AstroVela/vortex@090a557d0dc692dcd39b4b5823f2c06aa870fc83`, based on the same
 `vortex-data/vortex@7e06a99bb7772087c9546137ea6f4593235426a6` revision used by
 the native manifest. CMake explicitly sets `VORTEX_VANE_DISTRIBUTED=1` only
 for this lane; both Rust adapters translate it to
 `#[cfg(vortex_vane_distributed)]`, while C++ uses the matching
 `VORTEX_VANE_DISTRIBUTED` definition. No ordinary DuckDB source, submodule,
 manifest, or registration path is replaced.
+
+The Vane loader calls one exported Rust shim for both runtime initialization
+and catalog registration. The companion C++ registrar remains internal to the
+Rust artifact, so the same entry point works with staticlib and cdylib builds.
 
 ### Vane distributed Vortex scans
 
