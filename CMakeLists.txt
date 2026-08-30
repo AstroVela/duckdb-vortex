@@ -81,7 +81,6 @@ if(VORTEX_VANE_DISTRIBUTED)
         )
     endif()
     set(VORTEX_RUST_MANIFEST vortex-extension-vane/Cargo.toml)
-    set(VORTEX_CARGO_FEATURES FEATURES vane)
 endif()
 
 corrosion_import_crate(
@@ -89,7 +88,6 @@ corrosion_import_crate(
     CRATES vortex-extension
     CRATE_TYPES ${VORTEX_LIB_TYPE}
     FLAGS --crate-type=${VORTEX_LIB_TYPE}
-    ${VORTEX_CARGO_FEATURES}
     ${VORTEX_CARGO_PROFILE}
 )
 
