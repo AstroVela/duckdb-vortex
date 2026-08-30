@@ -89,6 +89,64 @@ make vane_wheel
 All Vane targets use the `vane_` prefix and fail if the Vane tooling, exact
 source revision, distributed headers, or required build inputs are absent.
 
+The Vane lane selects `vortex-extension-vane/Cargo.toml`; the ordinary lane
+continues to select `vortex-extension/Cargo.toml`. The Vane manifest pins the
+companion adapter commit
+`AstroVela/vortex@4aa457a61aad05364fcbb3b4ae16e71e2add0e23`, based on the same
+`vortex-data/vortex@7e06a99bb7772087c9546137ea6f4593235426a6` revision used by
+the native manifest. CMake explicitly sets `VORTEX_VANE_DISTRIBUTED=1` only
+for this lane; both Rust adapters translate it to
+`#[cfg(vortex_vane_distributed)]`, while C++ uses the matching
+`VORTEX_VANE_DISTRIBUTED` definition. No ordinary DuckDB source, submodule,
+manifest, or registration path is replaced.
+
+The Vane loader calls one exported Rust shim for both runtime initialization
+and catalog registration. The companion C++ registrar remains internal to the
+Rust artifact, so the same entry point works with staticlib and cdylib builds.
+
+### Vane distributed Vortex scans
+
+Vane registers distributed callbacks for both `read_vortex` and
+`vortex_scan`, including the `VARCHAR` and `LIST<VARCHAR>` overloads. Planning
+turns the coordinator's fully bound file listing into immutable owned state,
+serializes that state for workers, and creates one split per bound file. A
+worker opens exactly the files named by its assigned splits; it never expands
+the original path or glob again. The split identity includes the scan UUID,
+stable file index, canonical source URL and object path, and the file's byte
+length plus its storage ETag and/or object version. A missing file, changed
+object identity or byte length, duplicate split, unknown split, foreign scan
+UUID, or non-canonical payload fails the query.
+
+A fully pushed-down final aggregate is planned as one indivisible split over
+the complete pruned file set because independent final aggregates cannot be
+combined by this protocol. Empty scans and empty worker assignments are valid.
+Vortex late materialization is disabled in Vane builds because its second scan
+would require coupled split assignment.
+
+The current scope is deliberately limited to distributed reads:
+
+| Capability | Issue #4 behavior |
+| --- | --- |
+| Distributed `read_vortex` / `vortex_scan` | Enabled |
+| Local `COPY ... (FORMAT VORTEX)` | Enabled |
+| Distributed Vortex COPY | Not registered; tracked by #6 |
+| Sub-file/row-group splitting | Not implemented; tracked by #9 |
+
+Worker metadata checks and every subsequent range read are pinned to the
+coordinator-selected identity. Versioned stores read the selected object
+version; ETag-protected stores reject an identity-changing replacement even
+when its byte length is unchanged. A backend that provides neither a version
+nor an ETag is rejected during bind, with no path-and-size fallback. Every
+worker must be able to access the same canonical URLs with equivalent
+credentials.
+
+To build and run the focused protocol executable after the Vane-native build:
+
+```sh
+cmake --build build/vane-native --target vortex_distributed_protocol_test --parallel
+./build/vane-native/extension/vortex/vortex_distributed_protocol_test
+```
+
 ## Running the extension
 
 To run the extension code, simply start the shell with `./build/release/duckdb`.
@@ -194,7 +252,7 @@ When a PR is merged to `main`, the cherry-pick workflow automatically applies th
 
 The current release branch is configured in `.github/workflows/CherryPick.yml` via the `RELEASE_BRANCH` env var.
 
-## Changing Vortex version
+## Changing the native Vortex version
 
 The Vortex version is defined in `vortex-extension/Cargo.toml`. It can be a git commit, tag, branch or even a local path:
 
@@ -203,3 +261,11 @@ vortex-duckdb = { path = "<path/to/vortex/vortex-duckdb>"}
 ```
 
 See the Cargo docs for [git](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#specifying-dependencies-from-git-repositories) or [path](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#specifying-path-dependencies) dependencies for full details.
+
+The Vane lane is intentionally pinned separately. Its adapter changes live on
+an AstroVela/vortex branch based on the exact native Vortex revision and remain
+behind the explicit `VORTEX_VANE_DISTRIBUTED` build mode. To update it, review
+and merge the companion Vortex change first, pin its immutable commit in
+`vortex-extension-vane/Cargo.toml`, then regenerate
+`vortex-extension-vane/Cargo.lock`. Validate both the ordinary DuckDB lane and
+the Vane lane before merging the update.

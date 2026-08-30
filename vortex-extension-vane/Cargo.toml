@@ -1,0 +1,25 @@
+[package]
+name = "vortex-extension"
+description = "C-compatible Vortex DuckDB extension artifacts for Vane"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+[workspace]
+resolver = "2"
+
+[lib]
+name = "vortex_duckdb"
+path = "src/lib.rs"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+vortex-duckdb = { git = "https://github.com/AstroVela/vortex.git", rev = "4aa457a61aad05364fcbb3b4ae16e71e2add0e23" }
+
+[profile.dev.package.vortex-fastlanes]
+debug = false
+
+[profile.release-lto]
+inherits = "release"
+lto = "fat"
+codegen-units = 1

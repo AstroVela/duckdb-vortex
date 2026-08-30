@@ -8,6 +8,7 @@ test/python/__pycache__/
 .Rhistory
 compile_commands.json
 vortex-extension/target/
+vortex-extension-vane/target/
 
 #proto gen folder
 gen/

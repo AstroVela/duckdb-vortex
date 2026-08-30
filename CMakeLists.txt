@@ -71,8 +71,20 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     set(VORTEX_CARGO_PROFILE PROFILE release-lto)
 endif()
 
+set(VORTEX_RUST_MANIFEST vortex-extension/Cargo.toml)
+if(VORTEX_VANE_DISTRIBUTED)
+    if(NOT EXISTS
+       "${DUCKDB_MODULE_BASE_DIR}/src/include/duckdb/function/distributed_table_function.hpp"
+    )
+        message(FATAL_ERROR
+                "VORTEX_VANE_DISTRIBUTED requires Vane distributed scan support"
+        )
+    endif()
+    set(VORTEX_RUST_MANIFEST vortex-extension-vane/Cargo.toml)
+endif()
+
 corrosion_import_crate(
-    MANIFEST_PATH vortex-extension/Cargo.toml
+    MANIFEST_PATH ${VORTEX_RUST_MANIFEST}
     CRATES vortex-extension
     CRATE_TYPES ${VORTEX_LIB_TYPE}
     FLAGS --crate-type=${VORTEX_LIB_TYPE}
@@ -80,13 +92,16 @@ corrosion_import_crate(
 )
 
 # Forward the DuckDB version passed via CMake as an env var.
-message("Forwarding DUCKDB_VERSION=${DUCKDB_VERSION} to Cargo")
-message("Forwarding DUCKDB_SOURCE_DIR=${DUCKDB_MODULE_BASE_DIR} to Cargo")
-corrosion_set_env_vars(
-    ${VORTEX_RUST_TARGET_NAME}
+set(VORTEX_CARGO_ENV_VARS
     "DUCKDB_VERSION=${DUCKDB_VERSION}"
     "DUCKDB_SOURCE_DIR=${DUCKDB_MODULE_BASE_DIR}"
 )
+if(VORTEX_VANE_DISTRIBUTED)
+    list(APPEND VORTEX_CARGO_ENV_VARS "VORTEX_VANE_DISTRIBUTED=1")
+endif()
+message("Forwarding DUCKDB_VERSION=${DUCKDB_VERSION} to Cargo")
+message("Forwarding DUCKDB_SOURCE_DIR=${DUCKDB_MODULE_BASE_DIR} to Cargo")
+corrosion_set_env_vars(${VORTEX_RUST_TARGET_NAME} ${VORTEX_CARGO_ENV_VARS})
 
 include_directories(src/include)
 
@@ -95,6 +110,13 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
 build_static_extension(${TARGET_NAME} src/vortex_extension.cpp)
 build_loadable_extension(${TARGET_NAME} "" src/vortex_extension.cpp)
+
+if(VORTEX_VANE_DISTRIBUTED)
+    target_compile_definitions(${EXTENSION_NAME}
+                               PRIVATE VORTEX_VANE_DISTRIBUTED=1)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME}
+                               PRIVATE VORTEX_VANE_DISTRIBUTED=1)
+endif()
 
 set(VORTEX_WARNING_FLAGS -Wall -Wextra -Wpedantic -Wno-unused-parameter)
 
@@ -118,3 +140,18 @@ install(
     LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
     ARCHIVE DESTINATION "${INSTALL_LIB_DIR}"
 )
+
+option(BUILD_VORTEX_DISTRIBUTED_TESTS
+       "Build the Vane distributed Vortex scan protocol test" OFF)
+if(BUILD_VORTEX_DISTRIBUTED_TESTS)
+    if(NOT VORTEX_VANE_DISTRIBUTED)
+        message(FATAL_ERROR
+                "BUILD_VORTEX_DISTRIBUTED_TESTS requires VORTEX_VANE_DISTRIBUTED"
+        )
+    endif()
+    add_executable(vortex_distributed_protocol_test EXCLUDE_FROM_ALL
+                   test/cpp/vortex_distributed_protocol_test.cpp)
+    target_compile_features(vortex_distributed_protocol_test PRIVATE cxx_std_20)
+    target_link_libraries(vortex_distributed_protocol_test duckdb_static)
+    link_extension_libraries(vortex_distributed_protocol_test "")
+endif()
