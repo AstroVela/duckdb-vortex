@@ -8,6 +8,14 @@ on:
 permissions:
   contents: read
 
+env:
+  VANE_EXPECTED_REVISION: c4cf68751bac63f43d4c8774272eef9bedf3fce9
+  VANE_EXPECTED_PACKAGE_VERSION: 0.2.0.dev601
+  VANE_EXPECTED_FORK_VERSION: v1.5.5-vane.21793fefe3
+  VANE_EXPECTED_DUCKDB_SOURCE_ID: d5efe34df6
+  VORTEX_EXPECTED_REVISION: 7467346713821a56cd708db3a80e6807b88a0498
+  VORTEX_EXPECTED_VERSION: 0.1.0
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}
   cancel-in-progress: true
@@ -150,3 +158,160 @@ jobs:
           set -euo pipefail
           printf 'GitHub Actions ccache restore hit: %s\n' "${VANE_CCACHE_ACTION_HIT:-false}"
           ccache --show-stats
+
+  vane-wheel-vortex-local:
+    name: Installed Vane wheel local-fast Vortex qualification
+    needs:
+      - vane-extension
+      - vane-scan-lifecycle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      wheel_sha256: ${{ steps.installed_wheel.outputs.wheel_sha256 }}
+    env:
+      VANE_RUNNER: local-fast
+      VANE_FORBIDDEN_SOURCE_ROOT: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout qualification harness only
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download the verified Vane Vortex wheel
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: vane-vortex-wheel
+          path: ${{ runner.temp }}/vane-vortex-wheel
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install and exercise the wheel outside the checkout
+        id: installed_wheel
+        shell: bash
+        env:
+          VANE_WHEEL_DIR: ${{ runner.temp }}/vane-vortex-wheel
+          VANE_TEST_ROOT: ${{ runner.temp }}/vane-vortex-local-test
+          VANE_VENV: ${{ runner.temp }}/vane-vortex-local-venv
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          with Path("vane-extension.toml").open("rb") as manifest_file:
+              manifest = tomllib.load(manifest_file)
+          actual_vane_revision = manifest["vane"]["revision"]
+          expected_vane_revision = os.environ["VANE_EXPECTED_REVISION"]
+          if actual_vane_revision != expected_vane_revision:
+              raise SystemExit(
+                  f"Vane manifest revision mismatch: {actual_vane_revision} != {expected_vane_revision}"
+              )
+
+          with Path("vortex-extension-vane/Cargo.lock").open("rb") as lock_file:
+              lock = tomllib.load(lock_file)
+          vortex_packages = [
+              package for package in lock["package"] if package["name"] == "vortex-duckdb"
+          ]
+          if len(vortex_packages) != 1:
+              raise SystemExit("Cargo.lock must contain exactly one vortex-duckdb package")
+          expected_vortex_revision = os.environ["VORTEX_EXPECTED_REVISION"]
+          expected_vortex_source = (
+              "git+https://github.com/AstroVela/vortex.git"
+              f"?rev={expected_vortex_revision}#{expected_vortex_revision}"
+          )
+          package = vortex_packages[0]
+          if package.get("source") != expected_vortex_source:
+              raise SystemExit(
+                  f"Vortex Cargo source mismatch: {package.get('source')} != {expected_vortex_source}"
+              )
+          if package["version"] != os.environ["VORTEX_EXPECTED_VERSION"]:
+              raise SystemExit(
+                  "Vortex Cargo version mismatch: "
+                  f"{package['version']} != {os.environ['VORTEX_EXPECTED_VERSION']}"
+              )
+          PY
+
+          mapfile -t wheels < <(find "$VANE_WHEEL_DIR" -maxdepth 1 -type f -name 'vane_ai-*.whl' -print | sort)
+          test "${#wheels[@]}" -eq 1
+          wheel_sha256="$(sha256sum "${wheels[0]}" | awk '{print $1}')"
+          printf 'Vane Vortex wheel SHA256: %s\n' "$wheel_sha256"
+          printf 'wheel_sha256=%s\n' "$wheel_sha256" >> "$GITHUB_OUTPUT"
+
+          python -m venv "$VANE_VENV"
+          "$VANE_VENV/bin/python" -m pip install --disable-pip-version-check --no-cache-dir "${wheels[0]}"
+          mkdir "$VANE_TEST_ROOT"
+          install -m 0644 test/vane/vortex_wheel_test_support.py "$VANE_TEST_ROOT/"
+          install -m 0644 test/vane/test_vane_wheel_vortex.py "$VANE_TEST_ROOT/"
+
+          cd "$VANE_TEST_ROOT"
+          VANE_WHEEL_SHA256="$wheel_sha256" \
+            env -u PYTHONHOME -u PYTHONPATH \
+            "$VANE_VENV/bin/python" -I test_vane_wheel_vortex.py
+
+  vane-wheel-vortex-ray:
+    name: Installed Vane wheel two-node Ray Vortex qualification
+    needs:
+      - vane-extension
+      - vane-wheel-vortex-local
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      VANE_RUNNER: ray
+      VANE_FORBIDDEN_SOURCE_ROOT: ${{ github.workspace }}
+      VANE_LOCAL_WHEEL_SHA256: ${{ needs.vane-wheel-vortex-local.outputs.wheel_sha256 }}
+      RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: "0"
+      RAY_DEDUP_LOGS: "0"
+      VANE_UDF_TARGET_MAX_BATCH_BYTES: "4096"
+
+    steps:
+      - name: Checkout qualification harness only
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download the same verified Vane Vortex wheel
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: vane-vortex-wheel
+          path: ${{ runner.temp }}/vane-vortex-wheel
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install and exercise the same wheel on two Ray nodes
+        shell: bash
+        env:
+          VANE_WHEEL_DIR: ${{ runner.temp }}/vane-vortex-wheel
+          VANE_TEST_ROOT: ${{ runner.temp }}/vane-vortex-ray-test
+          VANE_VENV: ${{ runner.temp }}/vane-vortex-ray-venv
+        run: |
+          set -euo pipefail
+          mapfile -t wheels < <(find "$VANE_WHEEL_DIR" -maxdepth 1 -type f -name 'vane_ai-*.whl' -print | sort)
+          test "${#wheels[@]}" -eq 1
+          wheel_sha256="$(sha256sum "${wheels[0]}" | awk '{print $1}')"
+          printf 'Vane Vortex wheel SHA256: %s\n' "$wheel_sha256"
+          test "$wheel_sha256" = "$VANE_LOCAL_WHEEL_SHA256"
+
+          python -m venv "$VANE_VENV"
+          "$VANE_VENV/bin/python" -m pip install --disable-pip-version-check --no-cache-dir "${wheels[0]}"
+          mkdir "$VANE_TEST_ROOT"
+          install -m 0644 test/vane/vortex_wheel_test_support.py "$VANE_TEST_ROOT/"
+          install -m 0644 test/vane/test_vane_wheel_ray_vortex.py "$VANE_TEST_ROOT/"
+
+          cd "$VANE_TEST_ROOT"
+          VANE_WHEEL_SHA256="$wheel_sha256" \
+            env -u PYTHONHOME -u PYTHONPATH \
+            "$VANE_VENV/bin/python" -I test_vane_wheel_ray_vortex.py
