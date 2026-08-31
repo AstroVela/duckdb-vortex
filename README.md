@@ -92,10 +92,10 @@ source revision, distributed headers, or required build inputs are absent.
 The Vane lane selects `vortex-extension-vane/Cargo.toml`; the ordinary lane
 continues to select `vortex-extension/Cargo.toml`. The Vane manifest pins the
 companion adapter commit
-`AstroVela/vortex@a8ddfd1ffd5f83de7d4dd3c0fd59286f3d5cce6e`, based on the same
+`AstroVela/vortex@7467346713821a56cd708db3a80e6807b88a0498`, based on the same
 `vortex-data/vortex@7e06a99bb7772087c9546137ea6f4593235426a6` revision used by
 the native manifest. The manifest also pins
-`AstroVela/vane@3247ba7b0079b82a91887bbacc7e17bfcec8dae2`. CMake explicitly
+`AstroVela/vane@c4cf68751bac63f43d4c8774272eef9bedf3fce9`. CMake explicitly
 sets `VORTEX_VANE_DISTRIBUTED=1` only for this lane; both Rust adapters
 translate it to `#[cfg(vortex_vane_distributed)]`, while C++ uses the matching
 `VORTEX_VANE_DISTRIBUTED` definition. No ordinary DuckDB source, submodule,
@@ -181,6 +181,33 @@ readback, empty output, pre-publication cleanup, and conservative uncertain
 publication handling. ASAN and LSAN fail the target on use-after-free, invalid
 destruction, or leaked lifecycle state. The hosted Vane workflow runs the same
 target in a dedicated read-only CI job.
+
+The hosted workflow then downloads the one verified `vane-vortex-wheel`
+artifact into two independent clean virtual environments. The local-fast gate
+and the two-execution-node Ray gate run from test directories outside the
+checkout with Python isolated mode enabled. Both reject source-tree imports,
+disable DuckDB extension auto-install and auto-load, require Vortex to report
+`STATICALLY_LINKED`, and log the wheel checksum together with the exact Vane
+and DuckDB binary identities. Ray workers inherit that installed wheel before
+the cluster starts; they do not install, compile, or download extension code.
+
+The packaged Ray qualification covers single, list, and glob scans; schema and
+content; projection, filter, aggregate, and `file_index` pruning; empty input;
+repeated relation-plan execution; and comparison with the coordinator's native
+DuckDB result. It also kills a real Vane worker actor while a Vortex split is
+running and requires the replacement worker to finish attempt 1 with the exact
+replayed result. Distributed COPY covers multiple selected worker files, an
+empty output, failed-task cleanup and explicit retry, committed-manifest
+readback, and exclusion of a visible file not selected by that manifest.
+
+| Packaged Vane qualification | Status |
+| --- | --- |
+| Local-fast Vortex scan and COPY from the installed wheel | Supported |
+| Two-node Ray Vortex scan and shared-POSIX COPY from the same wheel | Supported |
+| Real actor-loss scan replay | Supported |
+| COPY failure cleanup, retry, selected manifest, and exact readback | Supported |
+| Object-store distributed Vortex COPY | Deferred to #8 |
+| Sub-file/row-group Vortex scan splitting | Deferred to #9 |
 
 ## Running the extension
 
