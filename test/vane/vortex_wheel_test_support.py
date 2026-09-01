@@ -146,6 +146,18 @@ def verify_installed_runtime(
         actual = connection.execute(f"SELECT current_setting('{setting}')").fetchone()
         require_equal(str(actual[0]).lower(), "false", f"{setting} setting")
 
+    httpfs = connection.execute(
+        "SELECT install_mode FROM duckdb_extensions() "
+        "WHERE extension_name = 'httpfs'"
+    ).fetchone()
+    if httpfs is None:
+        raise AssertionError("the packaged Vane wheel does not contain httpfs")
+    require_equal(
+        httpfs[0],
+        "STATICALLY_LINKED",
+        "packaged httpfs install mode",
+    )
+
     extension = connection.execute(
         "SELECT loaded, install_mode, extension_version FROM duckdb_extensions() "
         "WHERE extension_name = 'vortex'"

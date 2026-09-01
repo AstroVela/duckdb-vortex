@@ -1,7 +1,7 @@
 schema_version = 2
 name = "vortex"
 extension_config = "extension_config_vane.cmake"
-build_extensions = ["parquet"]
+build_extensions = ["httpfs", "parquet"]
 native_test_selection = "test/sql/sequence.test"
 
 [vane]

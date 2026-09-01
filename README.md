@@ -255,6 +255,8 @@ TO 's3://your-bucket/example.vortex' (FORMAT VORTEX);
 Vane distributed COPY uses the same URI form. Consumers must resolve a
 distributed result through its committed manifest and run ID; the mere
 presence of `.vortex` attempt objects under the prefix is not a commit.
+The packaged Vane wheel statically links `httpfs`, so this path uses
+`LOAD httpfs` without installing or loading an extension from a user cache.
 
 ### Reading a file
 
