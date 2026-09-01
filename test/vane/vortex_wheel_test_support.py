@@ -41,15 +41,18 @@ def error_chain_contains(error: BaseException, expected_message: str) -> bool:
 def require_error(
     description: str,
     operation: Callable[[], object],
-    expected_message: str,
-) -> None:
+    expected_message: str | None,
+) -> BaseException:
     try:
         operation()
     except Exception as error:
-        if not error_chain_contains(error, expected_message):
+        if expected_message is not None and not error_chain_contains(
+            error, expected_message
+        ):
             raise AssertionError(
                 f"{description}: expected error containing {expected_message!r}, got {error!r}"
             ) from error
+        return error
     else:
         raise AssertionError(f"{description}: operation unexpectedly succeeded")
 
@@ -142,6 +145,18 @@ def verify_installed_runtime(
     for setting in ("autoinstall_known_extensions", "autoload_known_extensions"):
         actual = connection.execute(f"SELECT current_setting('{setting}')").fetchone()
         require_equal(str(actual[0]).lower(), "false", f"{setting} setting")
+
+    httpfs = connection.execute(
+        "SELECT install_mode FROM duckdb_extensions() "
+        "WHERE extension_name = 'httpfs'"
+    ).fetchone()
+    if httpfs is None:
+        raise AssertionError("the packaged Vane wheel does not contain httpfs")
+    require_equal(
+        httpfs[0],
+        "STATICALLY_LINKED",
+        "packaged httpfs install mode",
+    )
 
     extension = connection.execute(
         "SELECT loaded, install_mode, extension_version FROM duckdb_extensions() "

@@ -15,6 +15,14 @@ from pathlib import Path
 _HARNESS_ROOT = str(Path(__file__).resolve().parent)
 sys.path.insert(0, _HARNESS_ROOT)
 try:
+    from vortex_s3_fault_proxy import S3FaultProxy  # noqa: E402
+    from vortex_s3_test_support import (  # noqa: E402
+        MinioConfig,
+        assert_credentials_absent,
+        assert_no_ambient_aws_credentials,
+        configure_s3_settings,
+        parse_s3_uri,
+    )
     from vortex_wheel_test_support import (  # noqa: E402
         TOTAL_ROWS,
         assert_exact_dataset,
@@ -216,6 +224,8 @@ class RayVortexHarness:
         operation: Callable[[], object],
         expected_rows: int,
         minimum_files: int,
+        *,
+        object_store: bool = False,
     ) -> dict[str, object]:
         previous_count = self.write_dispatch_count
         self.last_write_result = None
@@ -257,37 +267,73 @@ class RayVortexHarness:
         )
         run_id = str(result.get("copy_output_run_id") or "")
         require_true(bool(run_id), f"{description} has no run id")
-        manifest_path = Path(str(result.get("copy_output_manifest_path") or ""))
-        marker_path = Path(str(result.get("copy_output_committed_marker_path") or ""))
-        require_true(manifest_path.is_file(), f"{description} manifest does not exist")
-        require_true(
-            marker_path.is_file(), f"{description} committed marker does not exist"
-        )
-        selected_paths = sorted(
-            Path(str(entry["final_path"])).resolve() for entry in files
-        )
+        manifest_path = str(result.get("copy_output_manifest_path") or "")
+        marker_path = str(result.get("copy_output_committed_marker_path") or "")
+        if object_store:
+            require_true(
+                manifest_path.startswith("s3://")
+                and manifest_path.endswith("/manifest.txt"),
+                f"{description} has an invalid object-store manifest path",
+            )
+            require_true(
+                marker_path.startswith("s3://") and marker_path.endswith("/committed"),
+                f"{description} has an invalid object-store committed marker path",
+            )
+            selected_paths: list[object] = sorted(
+                str(entry["final_path"]) for entry in files
+            )
+        else:
+            local_manifest_path = Path(manifest_path)
+            local_marker_path = Path(marker_path)
+            require_true(
+                local_manifest_path.is_file(), f"{description} manifest does not exist"
+            )
+            require_true(
+                local_marker_path.is_file(),
+                f"{description} committed marker does not exist",
+            )
+            selected_paths = sorted(
+                Path(str(entry["final_path"])).resolve() for entry in files
+            )
         require_equal(
             len(set(selected_paths)),
             len(selected_paths),
             f"{description} unique selected paths",
         )
-        require_true(
-            all(path.is_file() for path in selected_paths),
-            f"{description} selected file is missing",
-        )
-        require_true(
-            all(path.name.startswith(f"{run_id}_") for path in selected_paths),
-            f"{description} selected path does not carry the run identity",
-        )
+        if object_store:
+            require_true(
+                all(
+                    parse_s3_uri(str(path))[1]
+                    .rsplit("/", 1)[-1]
+                    .startswith(f"{run_id}_")
+                    for path in selected_paths
+                ),
+                f"{description} selected object key does not carry the run identity",
+            )
+        else:
+            require_true(
+                all(Path(path).is_file() for path in selected_paths),
+                f"{description} selected file is missing",
+            )
+            require_true(
+                all(Path(path).name.startswith(f"{run_id}_") for path in selected_paths),
+                f"{description} selected path does not carry the run identity",
+            )
 
         committed = self.vane.ray_cxx.read_committed_copy_direct_write_result(
             str(result.get("copy_output_base_path") or ""),
             run_id,
             self.connection,
         )
-        committed_paths = sorted(
-            Path(str(entry["final_path"])).resolve() for entry in committed["files"]
-        )
+        if object_store:
+            committed_paths = sorted(
+                str(entry["final_path"]) for entry in committed["files"]
+            )
+        else:
+            committed_paths = sorted(
+                Path(str(entry["final_path"])).resolve()
+                for entry in committed["files"]
+            )
         require_equal(
             committed.get("rows_copied"),
             expected_rows,
@@ -302,11 +348,11 @@ class RayVortexHarness:
         self,
         description: str,
         operation: Callable[[], object],
-        expected_message: str,
-    ) -> None:
+        expected_message: str | None,
+    ) -> BaseException:
         previous_count = self.write_dispatch_count
         self.last_write_result = None
-        require_error(description, operation, expected_message)
+        error = require_error(description, operation, expected_message)
         require_equal(
             self.write_dispatch_count, previous_count + 1, f"{description} Ray dispatch"
         )
@@ -315,6 +361,7 @@ class RayVortexHarness:
             None,
             f"{description} did not return a committed result",
         )
+        return error
 
 
 class _NativeTaskCaptureBackend:
@@ -922,6 +969,358 @@ def exercise_distributed_copy(
     )
 
 
+def _require_remote_committed_readback(
+    harness: RayVortexHarness,
+    config: MinioConfig,
+    result: dict[str, object],
+    download_root: Path,
+    description: str,
+) -> set[str]:
+    base_path = str(result["copy_output_base_path"])
+    run_id = str(result["copy_output_run_id"])
+    committed = harness.vane.ray_cxx.read_committed_copy_direct_write_result(
+        base_path,
+        run_id,
+        harness.connection,
+    )
+    require_equal(
+        committed.get("rows_copied"), TOTAL_ROWS, f"{description} committed rows"
+    )
+    assert_credentials_absent(result, config, f"{description} runner result")
+    assert_credentials_absent(committed, config, f"{description} committed result")
+
+    committed_files = committed.get("files")
+    if not isinstance(committed_files, list):
+        raise AssertionError(
+            f"{description}: committed Vortex objects are not a list: "
+            f"{committed_files!r}"
+        )
+    if not all(isinstance(entry, dict) for entry in committed_files):
+        raise AssertionError(
+            f"{description}: committed Vortex object metadata is invalid: "
+            f"{committed_files!r}"
+        )
+    selected_entries = sorted(
+        committed_files, key=lambda entry: str(entry.get("final_path", ""))
+    )
+    require_true(bool(selected_entries), f"{description} selected no Vortex objects")
+    selected_keys: set[str] = set()
+    local_paths: list[Path] = []
+    declared_rows = 0
+    for index, entry in enumerate(selected_entries):
+        uri = str(entry.get("final_path") or "")
+        require_equal(
+            str(entry.get("staging_path") or ""),
+            uri,
+            f"{description} direct-write staging path",
+        )
+        require_equal(
+            str(entry.get("worker_output_path") or ""),
+            uri,
+            f"{description} direct-write worker path",
+        )
+        row_count = entry.get("row_count")
+        file_size_bytes = entry.get("file_size_bytes")
+        require_true(
+            type(row_count) is int and row_count >= 0,
+            f"{description} has an invalid object row count",
+        )
+        require_true(
+            type(file_size_bytes) is int and file_size_bytes > 0,
+            f"{description} has an invalid object byte size",
+        )
+        declared_rows += int(row_count)
+        bucket, key = parse_s3_uri(uri)
+        require_equal(bucket, config.bucket, f"{description} selected bucket")
+        require_true(key not in selected_keys, f"{description} selected a duplicate key")
+        selected_keys.add(key)
+        local_path = download_root / f"part-{index:02d}.vortex"
+        config.download(uri, local_path)
+        assert_credentials_absent(
+            local_path.read_bytes(), config, f"{description} Vortex object"
+        )
+        require_equal(
+            local_path.stat().st_size,
+            int(file_size_bytes),
+            f"{description} downloaded object byte size",
+        )
+        local_paths.append(local_path)
+    require_equal(declared_rows, TOTAL_ROWS, f"{description} per-object row count")
+
+    assert_exact_dataset(
+        harness.connection,
+        local_paths,
+        f"{description} exact downloaded readback",
+    )
+    manifest_uri = str(result["copy_output_manifest_path"])
+    marker_uri = str(result["copy_output_committed_marker_path"])
+    lifecycle_uri = str(result["copy_output_lifecycle_path"])
+    manifest = config.read_bytes(manifest_uri)
+    marker = config.read_bytes(marker_uri)
+    lifecycle = config.read_bytes(lifecycle_uri)
+    require_equal(marker, b"committed\n", f"{description} committed marker body")
+    assert_credentials_absent(manifest, config, f"{description} manifest")
+    assert_credentials_absent(marker, config, f"{description} marker")
+    assert_credentials_absent(lifecycle, config, f"{description} lifecycle")
+    return selected_keys
+
+
+def _copy_run_ids_from_lifecycle_keys(base_key: str, keys: list[str]) -> list[str]:
+    lifecycle_prefix = base_key.rstrip("/") + ".duckdb_commit/"
+    run_ids: list[str] = []
+    for key in keys:
+        if not key.startswith(lifecycle_prefix) or not key.endswith("/lifecycle.txt"):
+            continue
+        relative = key[len(lifecycle_prefix) :]
+        parts = relative.split("/")
+        if len(parts) == 2 and parts[0] and parts[1] == "lifecycle.txt":
+            run_ids.append(parts[0])
+    return sorted(set(run_ids))
+
+
+def _exercise_object_store_copy_through_proxy(
+    harness: RayVortexHarness,
+    root: Path,
+    files: list[Path],
+    config: MinioConfig,
+    proxy: S3FaultProxy,
+) -> None:
+    connection = harness.connection
+    source_query = (
+        "SELECT id, part, payload, nullable_value "
+        f"FROM read_vortex({vortex_file_list(files)})"
+    )
+    qualification_root = f"vane/{uuid.uuid4().hex}"
+    output_uri = config.uri(f"{qualification_root}/distributed-copy")
+
+    first = harness.require_copy(
+        "distributed S3 Vortex COPY",
+        lambda: connection.sql(source_query).write_file(output_uri, format="vortex"),
+        expected_rows=TOTAL_ROWS,
+        minimum_files=WORKER_COUNT,
+        object_store=True,
+    )
+    require_equal(
+        first.get("copy_output_base_path"),
+        output_uri,
+        "distributed S3 COPY canonical base URI",
+    )
+    first_keys = _require_remote_committed_readback(
+        harness,
+        config,
+        first,
+        root / "s3-first-readback",
+        "distributed S3 Vortex COPY",
+    )
+    stored_after_first = config.list_keys(qualification_root + "/")
+    require_equal(
+        sorted(key for key in stored_after_first if key.endswith(".vortex")),
+        sorted(first_keys),
+        "distributed S3 COPY retained only selected attempt objects",
+    )
+    assert_credentials_absent(
+        stored_after_first, config, "distributed S3 object names"
+    )
+
+    second = harness.require_copy(
+        "second distributed S3 Vortex COPY",
+        lambda: connection.sql(source_query).write_file(output_uri, format="vortex"),
+        expected_rows=TOTAL_ROWS,
+        minimum_files=WORKER_COUNT,
+        object_store=True,
+    )
+    require_equal(
+        second.get("copy_output_base_path"),
+        output_uri,
+        "second distributed S3 COPY canonical base URI",
+    )
+    second_keys = _require_remote_committed_readback(
+        harness,
+        config,
+        second,
+        root / "s3-second-readback",
+        "second distributed S3 Vortex COPY",
+    )
+    require_true(
+        str(first["copy_output_run_id"]) != str(second["copy_output_run_id"]),
+        "distributed S3 COPY reused a run identity",
+    )
+    require_true(
+        first_keys.isdisjoint(second_keys),
+        "distributed S3 COPY reused an immutable attempt object key",
+    )
+    stored_after_second = config.list_keys(qualification_root + "/")
+    require_equal(
+        sorted(key for key in stored_after_second if key.endswith(".vortex")),
+        sorted(first_keys | second_keys),
+        "repeated distributed S3 COPY immutable objects",
+    )
+
+    failed_marker_base = ""
+    failed_marker_run_id = ""
+    for stage in ("upload", "metadata", "manifest", "marker"):
+        base_key = f"{qualification_root}/fault-{stage}/output"
+        base_uri = config.uri(base_key)
+        proxy.controller.arm(stage)
+        try:
+            error = harness.require_copy_failure(
+                f"distributed S3 Vortex COPY {stage} failure",
+                lambda base_uri=base_uri: connection.sql(source_query).write_file(
+                    base_uri, format="vortex"
+                ),
+                None,
+            )
+            require_true(
+                proxy.controller.hits > 0,
+                f"distributed S3 Vortex COPY did not reach the {stage} fault",
+            )
+        finally:
+            proxy.controller.disarm()
+        assert_credentials_absent(
+            error, config, f"distributed S3 Vortex COPY {stage} error"
+        )
+        remaining = config.list_keys(f"{qualification_root}/fault-{stage}/")
+        assert_credentials_absent(
+            remaining, config, f"distributed S3 Vortex COPY {stage} object names"
+        )
+        require_equal(
+            [key for key in remaining if key.endswith("/committed")],
+            [],
+            f"distributed S3 Vortex COPY {stage} published no committed marker",
+        )
+        retained_text_keys = [key for key in remaining if key.endswith(".txt")]
+        for key in retained_text_keys:
+            assert_credentials_absent(
+                config.read_bytes(config.uri(key)),
+                config,
+                f"distributed S3 Vortex COPY {stage} retained metadata",
+            )
+        retained_manifests = [
+            key for key in remaining if key.endswith("/manifest.txt")
+        ]
+        run_ids = _copy_run_ids_from_lifecycle_keys(base_key, remaining)
+        if stage in {"manifest", "marker"}:
+            require_equal(
+                len(run_ids),
+                1,
+                f"distributed S3 Vortex COPY {stage} retained one recoverable run",
+            )
+            require_true(
+                any(key.endswith(".vortex") for key in remaining),
+                f"distributed S3 Vortex COPY {stage} did not retain attempt data",
+            )
+            if stage == "manifest":
+                require_equal(
+                    retained_manifests,
+                    [],
+                    "distributed S3 Vortex COPY manifest failure published no manifest",
+                )
+            else:
+                require_equal(
+                    len(retained_manifests),
+                    1,
+                    "distributed S3 Vortex COPY marker failure retained its manifest",
+                )
+        else:
+            require_equal(
+                retained_manifests,
+                [],
+                f"distributed S3 Vortex COPY {stage} published no manifest",
+            )
+            if not run_ids:
+                require_equal(
+                    remaining,
+                    [],
+                    f"distributed S3 Vortex COPY {stage} left unregistered artifacts",
+                )
+
+        for run_id in run_ids:
+            inspection = harness.vane.ray_cxx.inspect_copy_direct_write_run(
+                base_uri, run_id, connection
+            )
+            require_equal(
+                inspection.get("state"),
+                "UNCOMMITTED",
+                f"distributed S3 Vortex COPY {stage} recovery state",
+            )
+            require_equal(
+                inspection.get("copy_output_base_path"),
+                base_uri,
+                f"distributed S3 Vortex COPY {stage} canonical recovery URI",
+            )
+            assert_credentials_absent(
+                inspection,
+                config,
+                f"distributed S3 Vortex COPY {stage} inspection",
+            )
+            aborted = harness.vane.ray_cxx.force_abort_copy_direct_write_run(
+                base_uri, run_id, connection
+            )
+            require_equal(
+                aborted.get("safe_to_retry"),
+                True,
+                f"distributed S3 Vortex COPY {stage} force-abort retry safety",
+            )
+            assert_credentials_absent(
+                aborted,
+                config,
+                f"distributed S3 Vortex COPY {stage} force-abort result",
+            )
+            if stage == "marker":
+                failed_marker_base = base_uri
+                failed_marker_run_id = run_id
+        require_equal(
+            config.list_keys(f"{qualification_root}/fault-{stage}/"),
+            [],
+            f"distributed S3 Vortex COPY {stage} reconciled cleanup",
+        )
+
+    require_true(bool(failed_marker_base), "marker fault did not expose a retryable run")
+    retry = harness.require_copy(
+        "distributed S3 Vortex COPY retry after force-abort",
+        lambda: connection.sql(source_query).write_file(
+            failed_marker_base, format="vortex"
+        ),
+        expected_rows=TOTAL_ROWS,
+        minimum_files=WORKER_COUNT,
+        object_store=True,
+    )
+    require_equal(
+        retry.get("copy_output_base_path"),
+        failed_marker_base,
+        "distributed S3 Vortex COPY retry canonical base URI",
+    )
+    require_true(
+        str(retry["copy_output_run_id"]) != failed_marker_run_id,
+        "distributed S3 Vortex COPY retry reused the aborted run identity",
+    )
+    _require_remote_committed_readback(
+        harness,
+        config,
+        retry,
+        root / "s3-retry-readback",
+        "distributed S3 Vortex COPY retry after force-abort",
+    )
+
+
+def exercise_object_store_copy(
+    harness: RayVortexHarness,
+    root: Path,
+    files: list[Path],
+) -> None:
+    assert_no_ambient_aws_credentials()
+    config = MinioConfig.from_env()
+    with S3FaultProxy(config.endpoint) as proxy:
+        configure_s3_settings(harness.connection, config, endpoint=proxy.endpoint)
+        _exercise_object_store_copy_through_proxy(
+            harness,
+            root,
+            files,
+            config,
+            proxy,
+        )
+
+
 def main() -> None:
     if os.environ.get("VANE_RUNNER") != "ray":
         raise RuntimeError(
@@ -1043,12 +1442,13 @@ def main() -> None:
 
             exercise_worker_topology(harness, ray, expected_nodes, files)
             exercise_distributed_copy(harness, root, files, empty_path)
+            exercise_object_store_copy(harness, root, files)
             require_true(
                 harness.read_dispatch_count >= 13,
                 "Ray suite did not exercise enough Vortex reads",
             )
             require_true(
-                harness.write_dispatch_count >= 4,
+                harness.write_dispatch_count >= 11,
                 "Ray suite did not exercise enough Vortex writes",
             )
     finally:

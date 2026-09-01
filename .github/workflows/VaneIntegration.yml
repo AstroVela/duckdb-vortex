@@ -9,11 +9,11 @@ permissions:
   contents: read
 
 env:
-  VANE_EXPECTED_REVISION: c4cf68751bac63f43d4c8774272eef9bedf3fce9
-  VANE_EXPECTED_PACKAGE_VERSION: 0.2.0.dev601
-  VANE_EXPECTED_FORK_VERSION: v1.5.5-vane.21793fefe3
-  VANE_EXPECTED_DUCKDB_SOURCE_ID: d5efe34df6
-  VORTEX_EXPECTED_REVISION: 7467346713821a56cd708db3a80e6807b88a0498
+  VANE_EXPECTED_REVISION: e8f5c0805c92b3d9f0d1a258fbeea0b8c883c5c3
+  VANE_EXPECTED_PACKAGE_VERSION: 0.2.0.dev607
+  VANE_EXPECTED_FORK_VERSION: v1.5.5-vane.e8f5c0805c
+  VANE_EXPECTED_DUCKDB_SOURCE_ID: a85c99adc6
+  VORTEX_EXPECTED_REVISION: 8eedee91dcf630551ab6b5d8705fad3d853a7c33
   VORTEX_EXPECTED_VERSION: 0.1.0
 
 concurrency:
@@ -262,7 +262,7 @@ jobs:
       - vane-extension
       - vane-wheel-vortex-local
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     permissions:
       contents: read
     env:
@@ -291,6 +291,10 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Start isolated MinIO
+        shell: bash
+        run: bash test/object_store/start_minio.sh
+
       - name: Install and exercise the same wheel on two Ray nodes
         shell: bash
         env:
@@ -308,10 +312,35 @@ jobs:
           python -m venv "$VANE_VENV"
           "$VANE_VENV/bin/python" -m pip install --disable-pip-version-check --no-cache-dir "${wheels[0]}"
           mkdir "$VANE_TEST_ROOT"
+          install -m 0644 test/object_store/vortex_s3_fault_proxy.py "$VANE_TEST_ROOT/"
+          install -m 0644 test/object_store/vortex_s3_test_support.py "$VANE_TEST_ROOT/"
           install -m 0644 test/vane/vortex_wheel_test_support.py "$VANE_TEST_ROOT/"
           install -m 0644 test/vane/test_vane_wheel_ray_vortex.py "$VANE_TEST_ROOT/"
 
           cd "$VANE_TEST_ROOT"
           VANE_WHEEL_SHA256="$wheel_sha256" \
-            env -u PYTHONHOME -u PYTHONPATH \
+            env \
+              -u PYTHONHOME \
+              -u PYTHONPATH \
+              -u AWS_ACCESS_KEY_ID \
+              -u AWS_SECRET_ACCESS_KEY \
+              -u AWS_SESSION_TOKEN \
+              -u AWS_PROFILE \
+              -u AWS_DEFAULT_PROFILE \
+              -u AWS_SHARED_CREDENTIALS_FILE \
+              -u AWS_CONFIG_FILE \
+              -u AWS_WEB_IDENTITY_TOKEN_FILE \
+              -u AWS_ROLE_ARN \
+              -u AWS_ROLE_SESSION_NAME \
+              -u AWS_CONTAINER_CREDENTIALS_RELATIVE_URI \
+              -u AWS_CONTAINER_CREDENTIALS_FULL_URI \
+              -u AWS_CONTAINER_AUTHORIZATION_TOKEN \
+              -u AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE \
+              -u AWS_CREDENTIAL_FILE \
+              -u AWS_SECURITY_TOKEN \
             "$VANE_VENV/bin/python" -I test_vane_wheel_ray_vortex.py
+
+      - name: Stop isolated MinIO
+        if: always()
+        shell: bash
+        run: docker rm --force vortex-minio >/dev/null 2>&1 || true

@@ -90,16 +90,18 @@ All Vane targets use the `vane_` prefix and fail if the Vane tooling, exact
 source revision, distributed headers, or required build inputs are absent.
 
 The Vane lane selects `vortex-extension-vane/Cargo.toml`; the ordinary lane
-continues to select `vortex-extension/Cargo.toml`. The Vane manifest pins the
-companion adapter commit
-`AstroVela/vortex@7467346713821a56cd708db3a80e6807b88a0498`, based on the same
-`vortex-data/vortex@7e06a99bb7772087c9546137ea6f4593235426a6` revision used by
-the native manifest. The manifest also pins
-`AstroVela/vane@c4cf68751bac63f43d4c8774272eef9bedf3fce9`. CMake explicitly
+continues to select `vortex-extension/Cargo.toml`. Both manifests pin
+`AstroVela/vortex@8eedee91dcf630551ab6b5d8705fad3d853a7c33`, which adds the
+common DuckDB-filesystem-backed Vortex writer. The Vane integration manifest
+also pins
+`AstroVela/vane@e8f5c0805c92b3d9f0d1a258fbeea0b8c883c5c3`. CMake explicitly
 sets `VORTEX_VANE_DISTRIBUTED=1` only for this lane; both Rust adapters
 translate it to `#[cfg(vortex_vane_distributed)]`, while C++ uses the matching
-`VORTEX_VANE_DISTRIBUTED` definition. No ordinary DuckDB source, submodule,
-manifest, or registration path is replaced.
+`VORTEX_VANE_DISTRIBUTED` definition. The filesystem writer is intentionally
+shared so ordinary DuckDB and Vane can both use connection-scoped httpfs
+settings and secrets. All Vane scan/COPY protocol code remains conditionally
+compiled, and no ordinary DuckDB source, submodule, or registration path is
+replaced.
 
 The Vane loader calls one exported Rust shim for both runtime initialization
 and catalog registration. The companion C++ registrar remains internal to the
@@ -144,7 +146,7 @@ publishes a valid readable zero-row Vortex file through the same protocol.
 | Distributed `read_vortex` / `vortex_scan` | Enabled |
 | Local `COPY ... (FORMAT VORTEX)` | Enabled |
 | Distributed Vortex COPY on shared POSIX storage | Enabled |
-| Object-store distributed Vortex COPY | Not implemented; tracked by #8 |
+| Distributed Vortex COPY on S3-compatible storage | Enabled |
 | Sub-file/row-group splitting | Not implemented; tracked by #9 |
 
 Worker metadata checks and every subsequent range read are pinned to the
@@ -155,14 +157,17 @@ nor an ETag is rejected during bind, with no path-and-size fallback. Every
 worker must be able to access the same canonical URLs with equivalent
 credentials.
 
-The current COPY MVP requires every worker and the coordinator to see the same
-POSIX output namespace. Before publication, a failed run can be cleaned and
-retried under a fresh run/attempt identity. Once manifest publication has
-started, automatic failure handling retains artifacts for diagnosis; an
-explicit coordinator reconciliation may remove them only after proving that no
-committed marker exists. A committed run is never removed by uncommitted-run
-cleanup, and coordinator-finalize replay reads the existing manifest
-idempotently.
+For local output, every worker and the coordinator must see the same POSIX
+namespace. For S3-compatible output, workers write unique immutable object
+keys through DuckDB's httpfs filesystem, using the connection settings and
+credentials replayed by Vane. Credentials are not part of the Vortex bind,
+result metadata, manifest, marker, or object names. Before publication, a
+failed run can be cleaned and retried under a fresh run/attempt identity. Once
+manifest publication has started, automatic failure handling retains
+artifacts for diagnosis; an explicit coordinator reconciliation may remove
+them only after proving that no committed marker exists. A committed run is
+never removed by uncommitted-run cleanup, and coordinator-finalize replay
+reads the existing manifest idempotently.
 
 Run the focused protocol and lifecycle qualification under ASAN/LSAN with:
 
@@ -198,15 +203,23 @@ DuckDB result. It also kills a real Vane worker actor while a Vortex split is
 running and requires the replacement worker to finish attempt 1 with the exact
 replayed result. Distributed COPY covers multiple selected worker files, an
 empty output, failed-task cleanup and explicit retry, committed-manifest
-readback, and exclusion of a visible file not selected by that manifest.
+readback, and exclusion of a visible file not selected by that manifest. The
+same Ray job writes to an isolated MinIO service and injects upload, metadata,
+manifest, and committed-marker failures. It verifies immutable retry keys,
+conservative reconciliation, credential redaction, and exact downloaded
+readback. The ordinary distribution workflow separately loads its packaged
+native extension into DuckDB 1.5.5 and proves an S3 write authorized only by a
+temporary DuckDB secret.
 
-| Packaged Vane qualification | Status |
+| Packaged qualification | Status |
 | --- | --- |
 | Local-fast Vortex scan and COPY from the installed wheel | Supported |
 | Two-node Ray Vortex scan and shared-POSIX COPY from the same wheel | Supported |
 | Real actor-loss scan replay | Supported |
 | COPY failure cleanup, retry, selected manifest, and exact readback | Supported |
-| Object-store distributed Vortex COPY | Deferred to #8 |
+| Native DuckDB Vortex COPY to S3-compatible storage | Supported |
+| Two-node Ray Vortex COPY to S3-compatible storage | Supported |
+| Object-store publication failure injection | Supported |
 | Sub-file/row-group Vortex scan splitting | Deferred to #9 |
 
 ## Running the extension
@@ -222,6 +235,28 @@ COPY (SELECT * from generate_series(0, 4)) TO 'FILENAME.vortex' (FORMAT VORTEX);
 ```
 
 This will create a compressed vortex file from the sql table.
+
+Ordinary DuckDB can write through an S3-compatible filesystem after loading
+httpfs and configuring a normal DuckDB S3 secret:
+
+```sql
+INSTALL httpfs;
+LOAD httpfs;
+CREATE SECRET vortex_s3 (
+    TYPE S3,
+    KEY_ID 'your-key-id',
+    SECRET 'your-secret',
+    REGION 'us-east-1'
+);
+COPY (SELECT * FROM generate_series(0, 4))
+TO 's3://your-bucket/example.vortex' (FORMAT VORTEX);
+```
+
+Vane distributed COPY uses the same URI form. Consumers must resolve a
+distributed result through its committed manifest and run ID; the mere
+presence of `.vortex` attempt objects under the prefix is not a commit.
+The packaged Vane wheel statically links `httpfs`, so this path uses
+`LOAD httpfs` without installing or loading an extension from a user cache.
 
 ### Reading a file
 
@@ -324,10 +359,10 @@ vortex-duckdb = { path = "<path/to/vortex/vortex-duckdb>"}
 
 See the Cargo docs for [git](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#specifying-dependencies-from-git-repositories) or [path](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#specifying-path-dependencies) dependencies for full details.
 
-The Vane lane is intentionally pinned separately. Its adapter changes live on
-an AstroVela/vortex branch based on the exact native Vortex revision and remain
-behind the explicit `VORTEX_VANE_DISTRIBUTED` build mode. To update it, review
-and merge the companion Vortex change first, pin its immutable commit in
-`vortex-extension-vane/Cargo.toml`, then regenerate
-`vortex-extension-vane/Cargo.lock`. Validate both the ordinary DuckDB lane and
-the Vane lane before merging the update.
+The native and Vane manifests intentionally pin the same immutable
+AstroVela/vortex commit. Generic DuckDB adapter changes are shared by both
+lanes; distributed adapter changes remain behind the explicit
+`VORTEX_VANE_DISTRIBUTED` build mode. To update either lane, review and merge
+the companion Vortex change first, pin its immutable commit in both Cargo
+manifests, regenerate both lockfiles, and validate the ordinary DuckDB and Vane
+lanes before merging the update.
