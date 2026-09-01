@@ -21,3 +21,77 @@ jobs:
       extension_name: vortex
       exclude_archs: "wasm_mvp;wasm_eh;wasm_threads;windows_amd64_rtools;windows_amd64_mingw;windows_amd64;linux_amd64_musl"
       extra_toolchains: "rust"
+
+  native-s3-write:
+    name: Native DuckDB Vortex S3 write qualification
+    needs: duckdb-stable-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout object-store qualification harness
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download the native Linux extension artifact
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: vortex-v1.5.5-extension-linux_amd64
+          path: ${{ runner.temp }}/vortex-native-extension
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Start isolated MinIO
+        shell: bash
+        run: bash test/object_store/start_minio.sh
+
+      - name: Write and read Vortex through native DuckDB S3
+        shell: bash
+        env:
+          VORTEX_TEST_ROOT: ${{ runner.temp }}/native-vortex-s3-test
+          VORTEX_VENV: ${{ runner.temp }}/native-vortex-s3-venv
+          VORTEX_EXTENSION_DIR: ${{ runner.temp }}/vortex-native-extension
+        run: |
+          set -euo pipefail
+          mapfile -t extensions < <(find "$VORTEX_EXTENSION_DIR" -type f -name 'vortex.duckdb_extension' -print | sort)
+          test "${#extensions[@]}" -eq 1
+          extension_path="$(realpath "${extensions[0]}")"
+
+          python -m venv "$VORTEX_VENV"
+          "$VORTEX_VENV/bin/python" -m pip install --disable-pip-version-check --no-cache-dir "duckdb==1.5.5"
+          mkdir "$VORTEX_TEST_ROOT"
+          install -m 0644 test/object_store/vortex_s3_test_support.py "$VORTEX_TEST_ROOT/"
+          install -m 0644 test/object_store/test_native_vortex_s3.py "$VORTEX_TEST_ROOT/"
+
+          cd "$VORTEX_TEST_ROOT"
+          env \
+            -u AWS_ACCESS_KEY_ID \
+            -u AWS_SECRET_ACCESS_KEY \
+            -u AWS_SESSION_TOKEN \
+            -u AWS_PROFILE \
+            -u AWS_DEFAULT_PROFILE \
+            -u AWS_SHARED_CREDENTIALS_FILE \
+            -u AWS_CONFIG_FILE \
+            -u AWS_WEB_IDENTITY_TOKEN_FILE \
+            -u AWS_ROLE_ARN \
+            -u AWS_ROLE_SESSION_NAME \
+            -u AWS_CONTAINER_CREDENTIALS_RELATIVE_URI \
+            -u AWS_CONTAINER_CREDENTIALS_FULL_URI \
+            -u AWS_CONTAINER_AUTHORIZATION_TOKEN \
+            -u AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE \
+            -u AWS_CREDENTIAL_FILE \
+            -u AWS_SECURITY_TOKEN \
+            VORTEX_EXTENSION_PATH="$extension_path" \
+            "$VORTEX_VENV/bin/python" -I test_native_vortex_s3.py
+
+      - name: Stop isolated MinIO
+        if: always()
+        shell: bash
+        run: docker rm --force vortex-minio >/dev/null 2>&1 || true

@@ -41,15 +41,18 @@ def error_chain_contains(error: BaseException, expected_message: str) -> bool:
 def require_error(
     description: str,
     operation: Callable[[], object],
-    expected_message: str,
-) -> None:
+    expected_message: str | None,
+) -> BaseException:
     try:
         operation()
     except Exception as error:
-        if not error_chain_contains(error, expected_message):
+        if expected_message is not None and not error_chain_contains(
+            error, expected_message
+        ):
             raise AssertionError(
                 f"{description}: expected error containing {expected_message!r}, got {error!r}"
             ) from error
+        return error
     else:
         raise AssertionError(f"{description}: operation unexpectedly succeeded")
 

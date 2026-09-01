@@ -14,7 +14,7 @@ path = "src/lib.rs"
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
-vortex-duckdb = { git = "https://github.com/AstroVela/vortex.git", rev = "7467346713821a56cd708db3a80e6807b88a0498" }
+vortex-duckdb = { git = "https://github.com/AstroVela/vortex.git", rev = "8eedee91dcf630551ab6b5d8705fad3d853a7c33" }
 
 [profile.dev.package.vortex-fastlanes]
 debug = false
