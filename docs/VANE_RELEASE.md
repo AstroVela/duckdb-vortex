@@ -12,7 +12,8 @@ git submodule update --init --recursive
 
 - Vane: `472df75ab51fd3eac2642f6646545075549e5921`
   (`vane-ai==0.2.0.dev612`).
-- DuckDB SourceID: `edb8047859d9d5c443f46e86e6b5e507b5026944`.
+- Full DuckDB source tree ID: `edb8047859d9d5c443f46e86e6b5e507b5026944`;
+  native runtime SourceID: `edb8047859`.
 - Vortex Rust fork: `8eedee91dcf630551ab6b5d8705fad3d853a7c33`.
 - Rust: `1.97.1`, with the committed Vane adapter Cargo.lock.
 - Extension vcpkg: `74e6536215718009aae747d86d84b78376bf9e09`.
@@ -102,6 +103,7 @@ independent of the provider's CPython 3.10–3.14 wheel tags):
 python -m pip install -r vane-extension-ci-tools/requirements-release.txt
 python -I test/vane/test_vane_dynamic_wheel.py
 python -I test/vane/test_vane_provider_release.py
+python -I test/vane/test_vane_runtime_identity.py
 ```
 
 No editable install or full local Vane test suite is needed. Native builds and

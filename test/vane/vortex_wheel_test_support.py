@@ -74,6 +74,38 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
     return True
 
 
+def verify_duckdb_identity(
+    vane: object,
+    connection: object,
+    *,
+    expected_fork_version: str,
+    expected_source_id: str,
+) -> tuple[str, str]:
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_source_id):
+        raise AssertionError(
+            "expected DuckDB source tree ID must be a full lowercase SHA"
+        )
+    library_version, source_id = connection.execute(
+        "SELECT library_version, source_id FROM pragma_version()"
+    ).fetchone()
+    require_equal(
+        str(library_version),
+        expected_fork_version,
+        "installed Vane DuckDB fork version",
+    )
+    # The pinned Vane build exposes the first ten source-tree ID characters
+    # through DuckDB::SourceID(), pragma_version() and __git_revision__.
+    require_equal(
+        str(source_id),
+        expected_source_id[:10],
+        "installed Vane DuckDB expected runtime SourceID",
+    )
+    require_equal(
+        str(source_id), str(vane.__git_revision__), "installed Vane DuckDB SourceID"
+    )
+    return str(library_version), str(source_id)
+
+
 def verify_installed_runtime(
     vane: object, connection: object, expected_runner: str
 ) -> dict[str, str]:
@@ -103,7 +135,7 @@ def verify_installed_runtime(
     expected_source_id = os.environ.get("VANE_EXPECTED_DUCKDB_SOURCE_ID", "")
     if not re.fullmatch(r"[0-9a-f]{40}", expected_source_id):
         raise AssertionError(
-            "VANE_EXPECTED_DUCKDB_SOURCE_ID must be an exact DuckDB SourceID"
+            "VANE_EXPECTED_DUCKDB_SOURCE_ID must be a full DuckDB source tree ID"
         )
     expected_vortex_revision = os.environ.get("VORTEX_EXPECTED_REVISION", "")
     if not re.fullmatch(r"[0-9a-f]{40}", expected_vortex_revision):
@@ -179,21 +211,11 @@ def verify_installed_runtime(
         "loaded Vortex wheel identity",
     )
 
-    library_version, source_id = connection.execute(
-        "SELECT library_version, source_id FROM pragma_version()"
-    ).fetchone()
-    require_equal(
-        str(library_version),
-        expected_fork_version,
-        "installed Vane DuckDB fork version",
-    )
-    require_equal(
-        str(source_id), str(vane.__git_revision__), "installed Vane DuckDB SourceID"
-    )
-    require_equal(
-        str(source_id),
-        expected_source_id,
-        "installed Vane DuckDB expected SourceID",
+    library_version, source_id = verify_duckdb_identity(
+        vane,
+        connection,
+        expected_fork_version=expected_fork_version,
+        expected_source_id=expected_source_id,
     )
     require_equal(
         str(vane.__version__),
@@ -225,8 +247,7 @@ def create_vortex_fixture(connection: object, root: Path) -> tuple[list[Path], P
         start = file_index * ROWS_PER_FILE
         stop = start + ROWS_PER_FILE
         path = root / f"part-{file_index:02d}.vortex"
-        connection.execute(
-            f"""
+        connection.execute(f"""
             COPY (
                 SELECT
                     i::BIGINT AS id,
@@ -235,8 +256,7 @@ def create_vortex_fixture(connection: object, root: Path) -> tuple[list[Path], P
                     CASE WHEN i % 11 = 0 THEN NULL ELSE (i * 3)::INTEGER END AS nullable_value
                 FROM range({start}, {stop}) source(i)
             ) TO {sql_string(path)} (FORMAT VORTEX)
-            """
-        )
+            """)
         require_true(
             path.is_file() and path.stat().st_size > 0,
             f"fixture file was not written: {path}",
@@ -244,8 +264,7 @@ def create_vortex_fixture(connection: object, root: Path) -> tuple[list[Path], P
         files.append(path)
 
     empty_path = root / "empty.vortex"
-    connection.execute(
-        f"""
+    connection.execute(f"""
         COPY (
             SELECT
                 i::BIGINT AS id,
@@ -254,8 +273,7 @@ def create_vortex_fixture(connection: object, root: Path) -> tuple[list[Path], P
                 (i * 3)::INTEGER AS nullable_value
             FROM range(0) source(i)
         ) TO {sql_string(empty_path)} (FORMAT VORTEX)
-        """
-    )
+        """)
     require_true(
         empty_path.is_file() and empty_path.stat().st_size > 0,
         "the zero-row Vortex fixture was not written",

@@ -48,12 +48,11 @@ def load_dynamic_vortex(vane: object, connection: object) -> dict[str, object]:
             "VANE_EXPECTED_EXTENSION_TRUST_IDENTITY must select the explicit qualification trust root"
         )
     require_equal(str(vane.__version__), "0.2.0.dev612", "exact provider runtime")
-    require_equal(
-        connection.execute(
-            "SELECT library_version, source_id FROM pragma_version()"
-        ).fetchone(),
-        ("v1.5.5-vane.4bd8e72338", "edb8047859d9d5c443f46e86e6b5e507b5026944"),
-        "exact DuckDB fork and full SourceID",
+    helpers.verify_duckdb_identity(
+        vane,
+        connection,
+        expected_fork_version="v1.5.5-vane.4bd8e72338",
+        expected_source_id="edb8047859d9d5c443f46e86e6b5e507b5026944",
     )
     require_installed_module(vane)
     matches = [

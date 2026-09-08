@@ -56,6 +56,7 @@ jobs:
         run: |
           python -I test/vane/test_vane_provider_release.py
           python -I test/vane/test_vane_dynamic_wheel.py
+          python -I test/vane/test_vane_runtime_identity.py
 
   vane-dynamic-wheel:
     if: inputs.operation != 'testpypi-dev'
