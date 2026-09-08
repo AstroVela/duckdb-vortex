@@ -220,6 +220,11 @@ class DynamicWheelTest(unittest.TestCase):
         artifact = Path("/tmp/vortex.duckdb_extension")
         for dynamic, symbols in (
             ("Shared library: [libroaring.so]", ""),
+            (
+                "Shared library: [libutil.so.1]\nShared library: [libvortex.so]",
+                "",
+            ),
+            ("(RPATH) [/tmp/build]", ""),
             ("(RUNPATH) [/tmp/build]", ""),
             ("Shared library: [libc.so.6]", "U duckdb::ClientContext::Something()"),
             ("Shared library: [libc.so.6]", "U duckdb_create_vector"),
@@ -237,17 +242,24 @@ class DynamicWheelTest(unittest.TestCase):
                 ):
                     with self.assertRaises(self.builder.QualificationError):
                         self.builder._require_no_undefined_duckdb_symbols(artifact)
-        with mock.patch.object(
-            self.builder,
-            "_capture",
-            side_effect=[
-                "ELF 64-bit stripped",
-                "vortex_duckdb_cpp_init T 0 1",
-                "Shared library: [libc.so.6]",
-                "",
-            ],
+
+    def test_artifact_accepts_manylinux_glibc_libraries(self) -> None:
+        artifact = Path("/tmp/vortex.duckdb_extension")
+        for dynamic in (
+            "Shared library: [libc.so.6]",
+            "Shared library: [libc.so.6]\nShared library: [libutil.so.1]",
         ):
-            self.builder._require_no_undefined_duckdb_symbols(artifact)
+            with self.subTest(dynamic=dynamic), mock.patch.object(
+                self.builder,
+                "_capture",
+                side_effect=[
+                    "ELF 64-bit stripped",
+                    "vortex_duckdb_cpp_init T 0 1",
+                    dynamic,
+                    "U forkpty@GLIBC_2.2.5",
+                ],
+            ):
+                self.builder._require_no_undefined_duckdb_symbols(artifact)
 
     def test_export_and_strip_boundary(self) -> None:
         artifact = Path("/tmp/vortex.duckdb_extension")

@@ -283,6 +283,28 @@ class ProviderReleaseTest(unittest.TestCase):
             2,
         )
 
+    def test_artifact_downloads_require_digest_verification(self) -> None:
+        download_action = (
+            "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+        )
+        for name, expected_downloads in (
+            ("VaneExtension.yml", 7),
+            ("VaneIntegration.yml", 2),
+        ):
+            workflow = (REPOSITORY_ROOT / ".github/workflows" / name).read_text()
+            downloads = [
+                step
+                for step in workflow.split("\n      - ")
+                if "\n        uses: actions/download-artifact@" in step
+            ]
+            with self.subTest(workflow=name):
+                self.assertEqual(len(downloads), expected_downloads)
+            for step in downloads:
+                with self.subTest(workflow=name, step=step.splitlines()[0]):
+                    self.assertIn(f"        uses: {download_action} # v8.0.1\n", step)
+                    self.assertIn("\n          digest-mismatch: error\n", step)
+                    self.assertNotIn("continue-on-error:", step)
+
 
 if __name__ == "__main__":
     unittest.main()

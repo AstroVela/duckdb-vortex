@@ -189,6 +189,7 @@ def _require_no_undefined_duckdb_symbols(artifact: Path) -> None:
         "libpthread.so.0",
         "librt.so.1",
         "libstdc++.so.6",
+        "libutil.so.1",
     }
     needed = set(re.findall(r"Shared library: \[([^]]+)]", dynamic))
     if needed - allowed or "(RPATH)" in dynamic or "(RUNPATH)" in dynamic:

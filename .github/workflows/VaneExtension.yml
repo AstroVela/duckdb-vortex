@@ -353,8 +353,9 @@ jobs:
           persist-credentials: false
 
       - name: Download verified dynamic wheels
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          digest-mismatch: error
           name: vane-vortex-dynamic-wheels
           path: vane-wheels
 
@@ -399,8 +400,9 @@ jobs:
           persist-credentials: false
 
       - name: Download verified dynamic wheels
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          digest-mismatch: error
           name: vane-vortex-dynamic-wheels
           path: vane-wheels
 
@@ -801,8 +803,9 @@ jobs:
           persist-credentials: false
 
       - name: Download Vortex provider wheels
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          digest-mismatch: error
           name: vane-testpypi-vortex-wheels
           path: packages
 
@@ -878,8 +881,9 @@ jobs:
 
     steps:
       - name: Download Vortex distributions
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          digest-mismatch: error
           name: vane-testpypi-vortex-distributions
           path: dist
 
@@ -933,8 +937,9 @@ jobs:
           persist-credentials: false
 
       - name: Download Vortex distributions
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          digest-mismatch: error
           name: vane-testpypi-vortex-distributions
           path: dist
 
@@ -969,8 +974,9 @@ jobs:
           persist-credentials: false
 
       - name: Download expected Vortex distributions
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          digest-mismatch: error
           name: vane-testpypi-vortex-distributions
           path: expected/vortex
 
@@ -1045,8 +1051,9 @@ jobs:
           persist-credentials: false
 
       - name: Download expected Vortex distributions
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          digest-mismatch: error
           name: vane-testpypi-vortex-distributions
           path: expected/vortex
 
