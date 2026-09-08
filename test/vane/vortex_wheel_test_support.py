@@ -101,7 +101,7 @@ def verify_installed_runtime(
             "VANE_EXPECTED_FORK_VERSION must be an exact Vane DuckDB fork version"
         )
     expected_source_id = os.environ.get("VANE_EXPECTED_DUCKDB_SOURCE_ID", "")
-    if not re.fullmatch(r"[0-9a-f]{10}", expected_source_id):
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_source_id):
         raise AssertionError(
             "VANE_EXPECTED_DUCKDB_SOURCE_ID must be an exact DuckDB SourceID"
         )

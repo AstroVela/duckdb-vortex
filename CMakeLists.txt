@@ -19,6 +19,18 @@ endif()
 
 option(USE_SHARED_VORTEX OFF)
 option(VORTEX_VANE_DISTRIBUTED "Build Vane distributed Vortex support" OFF)
+option(VORTEX_VANE_DYNAMIC_PROVIDER
+       "Build a self-contained Vane dynamic-provider artifact" OFF)
+if(VORTEX_VANE_DYNAMIC_PROVIDER)
+    if(NOT VORTEX_VANE_DISTRIBUTED OR NOT EXTENSION_STATIC_BUILD OR USE_SHARED_VORTEX)
+        message(FATAL_ERROR
+                "Vortex providers require Vane distributed support and static Rust/DuckDB linkage")
+    endif()
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux"
+       OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+        message(FATAL_ERROR "Vortex providers currently require Linux x86_64")
+    endif()
+endif()
 set(VORTEX_RUST_TARGET_NAME "vortex_duckdb")
 if (USE_SHARED_VORTEX)
     set(VORTEX_LIB_TYPE "cdylib")
@@ -30,10 +42,15 @@ endif()
 message("Using vortex lib type '${VORTEX_LIB_TYPE}'")
 
 include(FetchContent)
+set(VORTEX_CORROSION_REVISION v0.5.2)
+if(VORTEX_VANE_DISTRIBUTED)
+    # Exact v0.5.2 source; ordinary DuckDB builds retain their existing input.
+    set(VORTEX_CORROSION_REVISION a1a1aaa057a5da656c06c3d8505b767a4e941709)
+endif()
 FetchContent_Declare(
     Corrosion
     GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git
-    GIT_TAG v0.5.2
+    GIT_TAG ${VORTEX_CORROSION_REVISION}
 )
 FetchContent_MakeAvailable(Corrosion)
 
@@ -72,6 +89,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 
 set(VORTEX_RUST_MANIFEST vortex-extension/Cargo.toml)
+set(VORTEX_CARGO_LOCK_FLAGS)
 if(VORTEX_VANE_DISTRIBUTED)
     if(NOT EXISTS
        "${DUCKDB_MODULE_BASE_DIR}/src/include/duckdb/function/distributed_table_function.hpp"
@@ -85,13 +103,14 @@ if(VORTEX_VANE_DISTRIBUTED)
         )
     endif()
     set(VORTEX_RUST_MANIFEST vortex-extension-vane/Cargo.toml)
+    set(VORTEX_CARGO_LOCK_FLAGS --locked)
 endif()
 
 corrosion_import_crate(
     MANIFEST_PATH ${VORTEX_RUST_MANIFEST}
     CRATES vortex-extension
     CRATE_TYPES ${VORTEX_LIB_TYPE}
-    FLAGS --crate-type=${VORTEX_LIB_TYPE}
+    FLAGS --crate-type=${VORTEX_LIB_TYPE} ${VORTEX_CARGO_LOCK_FLAGS}
     ${VORTEX_CARGO_PROFILE}
 )
 
@@ -137,6 +156,28 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
     ${SECURITY_FRAMEWORK}
     ${CORE_FOUNDATION_FRAMEWORK}
 )
+
+if(VORTEX_VANE_DYNAMIC_PROVIDER)
+    # The Rust archive itself calls DuckDB's C and C++ APIs. Resolve those
+    # references from the matching static engine after reading the Rust archive.
+    target_link_libraries(${LOADABLE_EXTENSION_NAME}
+                          duckdb_static dummy_static_extension_loader)
+    # Strip before DuckDB appends the metadata/signature footer. Only the native
+    # C++ loader entry point is public; private Rust/engine symbols stay local.
+    set(VORTEX_VANE_VERSION_SCRIPT
+        "${CMAKE_CURRENT_BINARY_DIR}/vane-vortex-exports.map")
+    file(WRITE "${VORTEX_VANE_VERSION_SCRIPT}"
+         "{\n  global: vortex_duckdb_cpp_init;\n  local: *;\n};\n")
+    set_property(TARGET ${LOADABLE_EXTENSION_NAME}
+                 APPEND PROPERTY LINK_DEPENDS "${VORTEX_VANE_VERSION_SCRIPT}")
+    target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE
+        "-Wl,--version-script=${VORTEX_VANE_VERSION_SCRIPT}"
+        -Wl,--exclude-libs,ALL
+        -Wl,-Bsymbolic
+        -Wl,--gc-sections
+        -Wl,--strip-all
+        -Wl,-z,defs)
+endif()
 
 install(
     TARGETS ${EXTENSION_NAME}

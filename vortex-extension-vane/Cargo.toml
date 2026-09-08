@@ -1,6 +1,7 @@
 [package]
 name = "vortex-extension"
 description = "C-compatible Vortex DuckDB extension artifacts for Vane"
+license = "Apache-2.0"
 edition = "2024"
 publish = false
 build = "build.rs"
