@@ -94,7 +94,8 @@ continues to select `vortex-extension/Cargo.toml`. Both manifests pin
 `AstroVela/vortex@8eedee91dcf630551ab6b5d8705fad3d853a7c33`, which adds the
 common DuckDB-filesystem-backed Vortex writer. The Vane integration manifest
 also pins
-`AstroVela/vane@e8f5c0805c92b3d9f0d1a258fbeea0b8c883c5c3`. CMake explicitly
+`AstroVela/vane@472df75ab51fd3eac2642f6646545075549e5921`
+(`vane-ai==0.2.0.dev612`). CMake explicitly
 sets `VORTEX_VANE_DISTRIBUTED=1` only for this lane; both Rust adapters
 translate it to `#[cfg(vortex_vane_distributed)]`, while C++ uses the matching
 `VORTEX_VANE_DISTRIBUTED` definition. The filesystem writer is intentionally
@@ -106,6 +107,19 @@ replaced.
 The Vane loader calls one exported Rust shim for both runtime initialization
 and catalog registration. The companion C++ registrar remains internal to the
 Rust artifact, so the same entry point works with staticlib and cdylib builds.
+
+### Independent Vane provider
+
+`VaneExtension.yml` builds and qualifies the separate
+`vane-extension-vortex` wheel, with exact `vane-ai==0.2.0.dev612` dependencies
+for CPython 3.10–3.14 on manylinux_2_28_x86_64. This profile statically embeds
+Rust and DuckDB inside the dynamic artifact but does not link Vortex into the
+base Vane wheel; only `vortex_duckdb_cpp_init` is publicly exported.
+
+See [Vane provider release](docs/VANE_RELEASE.md) for installed local/two-worker
+qualification, fixed source identities, first-publisher configuration and the
+protected manual TestPyPI workflow. Adding the workflow does not itself publish
+a package; the existing native/static qualification remains independent.
 
 ### Vane distributed Vortex scans and COPY
 

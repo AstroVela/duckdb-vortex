@@ -219,6 +219,10 @@ class ProviderReleaseTest(unittest.TestCase):
         self.assertEqual(
             manifest["vane"]["revision"], "472df75ab51fd3eac2642f6646545075549e5921"
         )
+        self.assertIn(
+            f'AstroVela/vane@{manifest["vane"]["revision"]}',
+            (REPOSITORY_ROOT / "README.md").read_text(),
+        )
         self.assertEqual(
             manifest["vcpkg"]["revision"], "74e6536215718009aae747d86d84b78376bf9e09"
         )
@@ -265,6 +269,19 @@ class ProviderReleaseTest(unittest.TestCase):
         self.assertIn("repository-url: https://test.pypi.org/legacy/", workflow)
         self.assertIn("skip-existing: true", workflow)
         self.assertEqual(workflow.count("--require-testpypi-publishable"), 2)
+
+    def test_rust_license_download_matches_the_pinned_manylinux_curl(self) -> None:
+        workflow = (REPOSITORY_ROOT / ".github/workflows/VaneExtension.yml").read_text()
+        self.assertNotIn("--retry-all-errors", workflow)
+        self.assertEqual(
+            workflow.count("curl --fail --location --retry 5 --retry-delay 5"), 2
+        )
+        self.assertEqual(
+            workflow.count(
+                "9099a59e820c38a68b9d65f300662a567d56562f9a10f6aa4c7e86c17c2566af"
+            ),
+            2,
+        )
 
 
 if __name__ == "__main__":
