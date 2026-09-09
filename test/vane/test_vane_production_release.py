@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import re
 import subprocess
 import sys
 import tomllib
@@ -54,12 +55,16 @@ def downloads(job):
     ]
 
 
-def test_production_manifest_preserves_every_other_source_contract():
+@pytest.mark.parametrize("future_revision", [None, "b" * 40])
+def test_production_manifest_preserves_every_other_source_contract(future_revision):
     dev = tomllib.loads((ROOT / "vane-extension.toml").read_text())
     prod = tomllib.loads((ROOT / "vane-extension-release.toml").read_text())
+    if future_revision is not None:
+        # A later release changes only this source pin, not the trust-key floor.
+        prod["vane"]["revision"] = future_revision
     assert dev["schema_version"] == prod["schema_version"] == 2
     assert dev["vane"]["revision"] == "472df75ab51fd3eac2642f6646545075549e5921"
-    assert prod["vane"]["revision"] == preflight.PRODUCTION_KEY_REVISION
+    assert re.fullmatch(r"[0-9a-f]{40}", prod["vane"]["revision"])
     prod["vane"]["revision"] = dev["vane"]["revision"]
     assert prod == dev
     assert builder.EXPECTED_RUST_RELEASE == "1.97.1"
@@ -67,6 +72,44 @@ def test_production_manifest_preserves_every_other_source_contract():
         builder.EXPECTED_VORTEX_REVISION == "8eedee91dcf630551ab6b5d8705fad3d853a7c33"
     )
     assert builder.SIGNING_PROFILES["production"] == ("astrovela/vane", None)
+
+
+@pytest.mark.parametrize("candidate", ["key", "descendant", "before-key"])
+def test_production_key_is_a_minimum_ancestor_not_a_frozen_pin(
+    candidate, tmp_path, monkeypatch
+):
+    def git(*arguments):
+        return subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Release Test",
+                "-c",
+                "user.email=release-test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                *arguments,
+            ],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    git("init", "--quiet")
+    revisions = {}
+    for name in ("before-key", "key", "descendant"):
+        git("commit", "--quiet", "--allow-empty", "-m", name)
+        revisions[name] = git("rev-parse", "HEAD")
+    monkeypatch.setattr(preflight, "PRODUCTION_KEY_REVISION", revisions["key"])
+    git("checkout", "--quiet", "--detach", revisions[candidate])
+    if candidate == "before-key":
+        with pytest.raises(subprocess.CalledProcessError):
+            preflight.require_production_key_ancestor(tmp_path)
+    else:
+        preflight.require_production_key_ancestor(tmp_path)
 
 
 @pytest.mark.parametrize("field", list(CONTEXT))

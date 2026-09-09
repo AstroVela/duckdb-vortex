@@ -19,6 +19,14 @@ from packaging.utils import parse_wheel_filename
 PRODUCTION_KEY_REVISION = "033b549afcb498633fd6669b26c054c00363004e"
 
 
+def require_production_key_ancestor(vane_source: Path) -> None:
+    subprocess.run(
+        ["git", "merge-base", "--is-ancestor", PRODUCTION_KEY_REVISION, "HEAD"],
+        cwd=vane_source,
+        check=True,
+    )
+
+
 def load_release_tools(extension_root: Path):
     path = extension_root / "vane-extension-ci-tools/scripts/vane_provider_release.py"
     spec = importlib.util.spec_from_file_location("_vortex_release_tools", path)
@@ -123,11 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     ).strip()
     release.validate_vane_version(version, arguments.channel)
     if arguments.channel == "release":
-        subprocess.run(
-            ["git", "merge-base", "--is-ancestor", PRODUCTION_KEY_REVISION, "HEAD"],
-            cwd=arguments.vane_source,
-            check=True,
-        )
+        require_production_key_ancestor(arguments.vane_source)
     require_indexed_runtime(
         release,
         version,
