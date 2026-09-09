@@ -9,10 +9,10 @@ permissions:
   contents: read
 
 env:
-  VANE_EXPECTED_REVISION: e8f5c0805c92b3d9f0d1a258fbeea0b8c883c5c3
-  VANE_EXPECTED_PACKAGE_VERSION: 0.2.0.dev607
-  VANE_EXPECTED_FORK_VERSION: v1.5.5-vane.e8f5c0805c
-  VANE_EXPECTED_DUCKDB_SOURCE_ID: a85c99adc6
+  VANE_EXPECTED_REVISION: 472df75ab51fd3eac2642f6646545075549e5921
+  VANE_EXPECTED_PACKAGE_VERSION: 0.2.0.dev612
+  VANE_EXPECTED_FORK_VERSION: v1.5.5-vane.4bd8e72338
+  VANE_EXPECTED_DUCKDB_SOURCE_ID: edb8047859d9d5c443f46e86e6b5e507b5026944
   VORTEX_EXPECTED_REVISION: 8eedee91dcf630551ab6b5d8705fad3d853a7c33
   VORTEX_EXPECTED_VERSION: 0.1.0
 
@@ -50,9 +50,9 @@ jobs:
   vane-extension:
     permissions:
       contents: read
-    uses: AstroVela/vane-extension-ci-tools/.github/workflows/_vane_extension_ci.yml@1ca9fe2e2e9c33f7422e10055d405fe1b28f1f1c
+    uses: AstroVela/vane-extension-ci-tools/.github/workflows/_vane_extension_ci.yml@671717e4816c21e65aa32a32dd0def8b030baa44
     with:
-      ci_tools_version: 1ca9fe2e2e9c33f7422e10055d405fe1b28f1f1c
+      ci_tools_version: 671717e4816c21e65aa32a32dd0def8b030baa44
       manifest: vane-extension.toml
       build_jobs: 8
       run_native_tests: true
@@ -182,8 +182,9 @@ jobs:
           persist-credentials: false
 
       - name: Download the verified Vane Vortex wheel
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          digest-mismatch: error
           name: vane-vortex-wheel
           path: ${{ runner.temp }}/vane-vortex-wheel
 
@@ -281,8 +282,9 @@ jobs:
           persist-credentials: false
 
       - name: Download the same verified Vane Vortex wheel
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          digest-mismatch: error
           name: vane-vortex-wheel
           path: ${{ runner.temp }}/vane-vortex-wheel
 

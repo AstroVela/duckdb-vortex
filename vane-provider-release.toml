@@ -1,0 +1,8 @@
+interpreters = ["cp310", "cp311", "cp312", "cp313", "cp314"]
+platforms = ["manylinux_2_28_x86_64"]
+# TestPyPI upload budget, independent of Vane's native artifact budgets.
+max_wheel_bytes = 100000000
+
+[providers.vortex]
+distribution = "vane-extension-vortex"
+dependencies = []
