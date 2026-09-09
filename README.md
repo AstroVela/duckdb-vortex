@@ -118,7 +118,10 @@ base Vane wheel; only `vortex_duckdb_cpp_init` is publicly exported.
 
 See [Vane provider release](docs/VANE_RELEASE.md) for installed local/two-worker
 qualification, fixed source identities, first-publisher configuration and the
-protected manual TestPyPI workflow. Adding the workflow does not itself publish
+protected manual TestPyPI workflow. A separate production manifest prepares
+TestPyPI staging and same-byte PyPI promotion after an actual production-key-aware
+Vane runtime is released. Signing, packaging and publishing use isolated jobs;
+the dev612 contract stays unchanged. Adding the workflow does not itself publish
 a package; the existing native/static qualification remains independent.
 
 ### Vane distributed Vortex scans and COPY

@@ -27,6 +27,7 @@ SIGNING_PROFILES = {
         "astrovela/vane-testpypi",
         "VANE_ENABLE_TESTPYPI_EXTENSION_SIGNING_KEY",
     ),
+    "production": ("astrovela/vane", None),
 }
 LICENSE_EXPRESSION = (
     "0BSD AND Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND "
@@ -232,9 +233,11 @@ def _compiler_launcher_arguments() -> list[str]:
     ]
 
 
-def _vcpkg_revision(extension_root: Path) -> str:
+def _vcpkg_revision(extension_root: Path, manifest_path: Path | None = None) -> str:
     manifest = tomllib.loads(
-        (extension_root / "vane-extension.toml").read_text(encoding="utf-8")
+        (manifest_path or extension_root / "vane-extension.toml").read_text(
+            encoding="utf-8"
+        )
     )
     vcpkg = manifest.get("vcpkg")
     if manifest.get("schema_version") != 2 or not isinstance(vcpkg, dict):
@@ -284,7 +287,7 @@ def _build_environment(
     vane_vcpkg_installed: Path,
     vcpkg_toolchain: Path,
     jobs: int,
-    signing_cmake_option: str,
+    signing_cmake_option: str | None,
 ) -> dict[str, str]:
     target_triplet = "x64-linux"
     dependency_prefix = vane_vcpkg_installed / target_triplet
@@ -312,7 +315,7 @@ def _build_environment(
         "-DVORTEX_VANE_DISTRIBUTED=ON",
         "-DVORTEX_VANE_DYNAMIC_PROVIDER=ON",
         "-DUSE_SHARED_VORTEX=OFF",
-        f"-D{signing_cmake_option}=ON",
+        *([f"-D{signing_cmake_option}=ON"] if signing_cmake_option else []),
         "-DVANE_LOADABLE_EXTENSIONS=vortex",
         f"-DVANE_LOADABLE_EXTENSION_OUTPUT_DIRECTORY={staged_extensions}",
         "-DVCPKG_BUILD=ON",
@@ -603,7 +606,9 @@ def _build_provider_wheel(
 
 def _parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--phase", choices=("full", "prepare"), default="full")
     parser.add_argument("--extension-root", required=True, type=Path)
+    parser.add_argument("--manifest", type=Path)
     parser.add_argument("--vane-source", required=True, type=Path)
     parser.add_argument("--vane-revision", required=True)
     parser.add_argument("--vane-vcpkg-installed", required=True, type=Path)
@@ -615,13 +620,13 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--signing-profile", required=True, choices=tuple(SIGNING_PROFILES)
     )
-    parser.add_argument("--signing-private-key", required=True, type=Path)
+    parser.add_argument("--signing-private-key", type=Path)
     parser.add_argument(
         "--consume-signing-private-key",
         action="store_true",
         help="Securely remove the ephemeral key input before starting any build subprocess",
     )
-    runtime_group = parser.add_mutually_exclusive_group(required=True)
+    runtime_group = parser.add_mutually_exclusive_group()
     runtime_group.add_argument(
         "--package-local-runtime",
         action="store_true",
@@ -649,8 +654,47 @@ def _clear_key(contents: bytearray) -> None:
     contents.clear()
 
 
+def _validate_phase(arguments: argparse.Namespace) -> None:
+    if arguments.phase == "full":
+        if arguments.signing_profile != "ci-test":
+            raise QualificationError(
+                "published providers require isolated prepare/sign/package jobs"
+            )
+        if arguments.signing_private_key is None:
+            raise QualificationError(
+                "CI qualification requires the public test fixture key"
+            )
+        if not arguments.package_local_runtime and not arguments.runtime_python:
+            raise QualificationError("at least one indexed runtime pair is required")
+    elif (
+        arguments.signing_private_key is not None
+        or arguments.consume_signing_private_key
+        or arguments.package_local_runtime
+        or arguments.runtime_python
+        or arguments.runtime_wheel
+    ):
+        raise QualificationError(
+            "prepare accepts no signing key or runtime packaging inputs"
+        )
+
+
+def _emit_unsigned_bundle(
+    unsigned: Path, licenses: Iterable[Path], output: Path
+) -> None:
+    if any(output.iterdir()):
+        raise QualificationError("prepare requires an empty output directory")
+    native = output / "artifacts"
+    notices = output / "licenses/vortex"
+    native.mkdir()
+    notices.mkdir(parents=True)
+    shutil.copyfile(unsigned, native / "vortex.duckdb_extension")
+    for license_file in licenses:
+        shutil.copyfile(license_file, notices / license_file.name)
+
+
 def main() -> int:
     arguments = _parse_arguments()
+    _validate_phase(arguments)
     if arguments.jobs <= 0:
         raise QualificationError("--jobs must be a positive integer")
     if arguments.package_local_runtime and arguments.runtime_wheel:
@@ -661,15 +705,8 @@ def main() -> int:
         raise QualificationError(
             "--runtime-python and --runtime-wheel must be supplied the same number of times"
         )
-    if not arguments.package_local_runtime and not arguments.runtime_python:
-        raise QualificationError("at least one indexed runtime pair is required")
-    if arguments.signing_profile == "testpypi":
-        if not arguments.consume_signing_private_key or arguments.package_local_runtime:
-            raise QualificationError(
-                "TestPyPI requires indexed runtimes and --consume-signing-private-key"
-            )
-
     extension_root = _require_directory(arguments.extension_root, "extension root")
+    manifest_path = arguments.manifest or extension_root / "vane-extension.toml"
     _require_rust_contract(extension_root)
     cargo_about = _require_file(arguments.cargo_about, "cargo-about executable")
     if not os.access(cargo_about, os.X_OK):
@@ -679,7 +716,7 @@ def main() -> int:
         arguments.vane_vcpkg_installed, "Vane vcpkg installation"
     )
     toolchain = _require_vcpkg_toolchain(
-        arguments.vcpkg_toolchain, _vcpkg_revision(extension_root)
+        arguments.vcpkg_toolchain, _vcpkg_revision(extension_root, manifest_path)
     )
     _require_git_revision(vane_source, arguments.vane_revision, "Vane")
     tools = extension_root / "vane-extension-ci-tools"
@@ -691,7 +728,7 @@ def main() -> int:
         "-I",
         str(tools / "scripts/vane_extension.py"),
         "--manifest",
-        str(extension_root / "vane-extension.toml"),
+        str(manifest_path),
         "--extension-root",
         str(extension_root),
     )
@@ -737,8 +774,13 @@ def main() -> int:
     )
 
     with ExitStack() as cleanup:
-        key = _read_signing_private_key(
-            arguments.signing_private_key, consume=arguments.consume_signing_private_key
+        key = (
+            _read_signing_private_key(
+                arguments.signing_private_key,
+                consume=arguments.consume_signing_private_key,
+            )
+            if arguments.phase == "full"
+            else bytearray()
         )
         cleanup.callback(_clear_key, key)
         base_output = Path(
@@ -781,6 +823,15 @@ def main() -> int:
             "Vortex artifact",
         )
         _require_no_undefined_duckdb_symbols(unsigned)
+        licenses = _stage_license_files(
+            cargo_about=cargo_about,
+            extension_root=extension_root,
+            vane_source=vane_source,
+            build_directory=build_directory,
+        )
+        if arguments.phase == "prepare":
+            _emit_unsigned_bundle(unsigned, licenses, output_directory)
+            return 0
         signed_directory = build_directory / "signed-vane-extensions"
         signed_directory.mkdir(parents=True, exist_ok=True)
         signed = signed_directory / unsigned.name
@@ -809,12 +860,6 @@ def main() -> int:
             if ephemeral_key.exists():
                 _destroy_file(ephemeral_key)
 
-        licenses = _stage_license_files(
-            cargo_about=cargo_about,
-            extension_root=extension_root,
-            vane_source=vane_source,
-            build_directory=build_directory,
-        )
         staging = Path(
             cleanup.enter_context(
                 tempfile.TemporaryDirectory(

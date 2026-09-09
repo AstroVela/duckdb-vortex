@@ -127,7 +127,12 @@ class RuntimeIdentityTest(unittest.TestCase):
             mock.patch.dict(sys.modules, {"vane.extensions": extensions}),
             mock.patch.dict(
                 os.environ,
-                {"VANE_EXPECTED_EXTENSION_TRUST_IDENTITY": "vane-ci-test-key"},
+                {
+                    "VANE_EXPECTED_EXTENSION_TRUST_IDENTITY": "vane-ci-test-key",
+                    "VANE_EXPECTED_PACKAGE_VERSION": self.vane.__version__,
+                    "VANE_EXPECTED_FORK_VERSION": FORK_VERSION,
+                    "VANE_EXPECTED_DUCKDB_SOURCE_ID": SOURCE_TREE_ID,
+                },
             ),
             mock.patch.object(
                 self.dynamic, "entry_points", return_value=[]
@@ -148,6 +153,46 @@ class RuntimeIdentityTest(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "expected runtime SourceID"):
                 self.dynamic.load_dynamic_vortex(self.vane, self.connection)
             discover.assert_not_called()
+
+    def test_production_harness_uses_explicit_runtime_identity_without_dev_fallback(
+        self,
+    ) -> None:
+        extensions = ModuleType("vane.extensions")
+        extensions.LocalExtensionProvider = object
+        self.vane.__version__ = "0.2.0rc1"
+        source = "b" * 40
+        fork = "v1.5.5-vane.aaaaaaaaaa"
+        self.vane.__git_revision__ = source[:10]
+        self.connection.execute.return_value.fetchone.return_value = (fork, source[:10])
+        with (
+            mock.patch.dict(sys.modules, {"vane.extensions": extensions}),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "VANE_EXPECTED_EXTENSION_TRUST_IDENTITY": "astrovela/vane",
+                    "VANE_EXPECTED_PACKAGE_VERSION": "0.2.0rc1",
+                    "VANE_EXPECTED_FORK_VERSION": fork,
+                    "VANE_EXPECTED_DUCKDB_SOURCE_ID": source,
+                },
+                clear=True,
+            ),
+            mock.patch.object(
+                self.dynamic, "entry_points", return_value=[]
+            ) as discover,
+        ):
+            with self.assertRaisesRegex(
+                AssertionError, "installed Vortex provider count"
+            ):
+                self.dynamic.load_dynamic_vortex(self.vane, self.connection)
+            discover.assert_called_once()
+            discover.reset_mock()
+            self.vane.__version__ = "0.2.0.dev612"
+            with self.assertRaisesRegex(AssertionError, "exact provider runtime"):
+                self.dynamic.load_dynamic_vortex(self.vane, self.connection)
+            discover.assert_not_called()
+            del os.environ["VANE_EXPECTED_PACKAGE_VERSION"]
+            with self.assertRaises(KeyError):
+                self.dynamic.load_dynamic_vortex(self.vane, self.connection)
 
 
 if __name__ == "__main__":

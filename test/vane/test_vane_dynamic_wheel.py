@@ -123,6 +123,7 @@ class DynamicWheelTest(unittest.TestCase):
 
     def test_testpypi_cannot_package_an_unpublished_runtime(self) -> None:
         arguments = argparse.Namespace(
+            phase="full",
             jobs=12,
             package_local_runtime=True,
             runtime_python=[],
@@ -134,22 +135,24 @@ class DynamicWheelTest(unittest.TestCase):
             self.builder, "_parse_arguments", return_value=arguments
         ):
             with self.assertRaisesRegex(
-                self.builder.QualificationError, "indexed runtimes"
+                self.builder.QualificationError, "isolated prepare/sign/package"
             ):
                 self.builder.main()
 
-    def test_build_failure_consumes_and_clears_the_testpypi_key(self) -> None:
+    def test_build_failure_consumes_and_clears_the_ci_fixture_key(self) -> None:
         with tempfile.TemporaryDirectory() as value:
             root = Path(value)
             key_path = root / "key.pem"
             key_path.write_bytes(b"test-key")
             key_path.chmod(0o600)
             arguments = argparse.Namespace(
+                phase="full",
+                manifest=None,
                 jobs=12,
                 package_local_runtime=False,
                 runtime_python=[Path("/runtime/python")],
                 runtime_wheel=[Path("/runtime/vane.whl")],
-                signing_profile="testpypi",
+                signing_profile="ci-test",
                 consume_signing_private_key=True,
                 signing_private_key=key_path,
                 extension_root=ROOT,

@@ -43,16 +43,23 @@ def load_dynamic_vortex(vane: object, connection: object) -> dict[str, object]:
     from vane.extensions import LocalExtensionProvider
 
     trust_identity = os.environ.get("VANE_EXPECTED_EXTENSION_TRUST_IDENTITY")
-    if trust_identity not in {"vane-ci-test-key", "astrovela/vane-testpypi"}:
+    if trust_identity not in {
+        "vane-ci-test-key",
+        "astrovela/vane-testpypi",
+        "astrovela/vane",
+    }:
         raise AssertionError(
             "VANE_EXPECTED_EXTENSION_TRUST_IDENTITY must select the explicit qualification trust root"
         )
-    require_equal(str(vane.__version__), "0.2.0.dev612", "exact provider runtime")
+    expected_version = os.environ["VANE_EXPECTED_PACKAGE_VERSION"]
+    if not expected_version:
+        raise AssertionError("the exact expected provider runtime must be supplied")
+    require_equal(str(vane.__version__), expected_version, "exact provider runtime")
     helpers.verify_duckdb_identity(
         vane,
         connection,
-        expected_fork_version="v1.5.5-vane.4bd8e72338",
-        expected_source_id="edb8047859d9d5c443f46e86e6b5e507b5026944",
+        expected_fork_version=os.environ["VANE_EXPECTED_FORK_VERSION"],
+        expected_source_id=os.environ["VANE_EXPECTED_DUCKDB_SOURCE_ID"],
     )
     require_installed_module(vane)
     matches = [
