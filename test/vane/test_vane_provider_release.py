@@ -116,7 +116,10 @@ class ProviderReleaseTest(unittest.TestCase):
                 VANE_VERSION,
                 "--github-output",
                 str(outputs),
-                "--require-testpypi-publishable",
+                "--channel",
+                "testpypi-dev",
+                "--require-publishable-on",
+                "testpypi",
             ]
             output = io.StringIO()
             with (
@@ -155,6 +158,8 @@ class ProviderReleaseTest(unittest.TestCase):
                         *source_arguments(directory),
                         "--vane-version",
                         VANE_VERSION,
+                        "--channel",
+                        "testpypi-dev",
                     ]
                     with (
                         mock.patch.object(self.validator, "verify_sources"),
@@ -186,6 +191,8 @@ class ProviderReleaseTest(unittest.TestCase):
                 }
                 command = ["verify-index", *source_arguments(directory)]
                 command += [
+                    "--index",
+                    "testpypi",
                     "--provider",
                     provider,
                     "--version",
@@ -261,14 +268,18 @@ class ProviderReleaseTest(unittest.TestCase):
         workflow = (REPOSITORY_ROOT / ".github/workflows/VaneExtension.yml").read_text()
         self.assertEqual(workflow.count("scripts/vane_provider_release.py validate"), 3)
         self.assertEqual(
-            workflow.count("scripts/vane_provider_release.py verify-index"), 1
+            workflow.count("scripts/vane_provider_release.py verify-index"), 2
         )
         self.assertIn("HEAD:vane-extension-ci-tools", workflow)
         self.assertIn("refs/heads/v1.5-variegata_vane", workflow)
         self.assertIn('test "$GITHUB_EVENT_NAME" = workflow_dispatch', workflow)
         self.assertIn("repository-url: https://test.pypi.org/legacy/", workflow)
         self.assertIn("skip-existing: true", workflow)
-        self.assertEqual(workflow.count("--require-testpypi-publishable"), 2)
+        self.assertEqual(workflow.count("--require-publishable-on testpypi"), 2)
+        self.assertEqual(workflow.count("--require-publishable-on pypi"), 2)
+        self.assertEqual(
+            workflow.count("scripts/vane_provider_release.py verify-promotion"), 1
+        )
 
     def test_rust_license_download_matches_the_pinned_manylinux_curl(self) -> None:
         workflow = (REPOSITORY_ROOT / ".github/workflows/VaneExtension.yml").read_text()
@@ -288,7 +299,7 @@ class ProviderReleaseTest(unittest.TestCase):
             "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
         )
         for name, expected_downloads in (
-            ("VaneExtension.yml", 7),
+            ("VaneExtension.yml", 13),
             ("VaneIntegration.yml", 2),
         ):
             workflow = (REPOSITORY_ROOT / ".github/workflows" / name).read_text()

@@ -1,14 +1,14 @@
 # Vane Vortex provider release
 
 This repository owns the Vortex native build adapter and its top-level TestPyPI
-publisher. Shared source, release-matrix, immutable-retry and index validation
+and PyPI publishers. Shared source, release-matrix, immutable-retry and index validation
 comes from the committed `vane-extension-ci-tools` submodule; initialize it with:
 
 ```sh
 git submodule update --init --recursive
 ```
 
-## Fixed candidate
+## Fixed development candidate
 
 - Vane: `472df75ab51fd3eac2642f6646545075549e5921`
   (`vane-ai==0.2.0.dev612`).
@@ -17,13 +17,29 @@ git submodule update --init --recursive
 - Vortex Rust fork: `8eedee91dcf630551ab6b5d8705fad3d853a7c33`.
 - Rust: `1.97.1`, with the committed Vane adapter Cargo.lock.
 - Extension vcpkg: `74e6536215718009aae747d86d84b78376bf9e09`.
-- Shared Vane CI tools: `671717e4816c21e65aa32a32dd0def8b030baa44`.
+- Shared Vane CI tools: `618aec05ad68c8c130c69505b1fd99311fc9f47d`.
 - Provider: `vane-extension-vortex`, CPython 3.10–3.14,
   `manylinux_2_28_x86_64`, with no other provider dependencies.
 
 The runtime requirement is exact. The provider uses Vane's descriptor-derived
 package version, not the repository's native extension version or a new Vane
 release. No tag or republishing of vane-ai is needed for this candidate.
+
+The separate `vane-extension-release.toml` currently pins Vane
+`033b549afcb498633fd6669b26c054c00363004e`, which introduces the production
+native trust root. **This is preparation, not a released runtime.** The
+`release` operation intentionally fails its read-only preflight with this
+development source version, before a native build or signing approval.
+Before the first production candidate, replace only the release manifest's Vane
+pin through a reviewed PR with an exact, actually published PyPI runtime commit
+that includes the production-key commit. The dev612 manifest is unchanged.
+
+The preflight requires a protected manual dispatch from this repository's
+`v1.5-variegata_vane` branch, derives the canonical runtime version from full
+source history without version overrides, and checks that all five non-yanked
+runtime wheels are indexed. Development candidates use TestPyPI only; production
+candidates use PyPI only. Production may be alpha, beta, RC, final or post-release,
+but not a development, local, epoch or noncanonical version.
 
 ## Build and qualification
 
@@ -55,6 +71,47 @@ test owns a head with no execution CPUs and two one-CPU worker nodes, checks the
 prepared dynamic manifest, proves Vortex fragment execution on both persistent
 workers, and verifies distributed COPY and empty COPY readback. Both CI and
 post-upload tests use installed wheels and isolated Python processes.
+The dynamic tests receive the exact runtime version, fork version and full
+DuckDB source tree ID from the selected source, so production does not reuse
+hard-coded dev612 expectations or skip native identity checks.
+
+## Signing and publication boundaries
+
+Both publishing operations use fresh jobs at each privilege boundary:
+
+```text
+read-only preflight
+  -> native prepare (no secrets or OIDC)
+  -> protected native signer (stdlib + OpenSSL only)
+  -> package + native verification (no secrets or OIDC)
+  -> complete matrix validation + checksums/SBOM/provenance
+  -> minimal TestPyPI upload -> read-only index verification
+  -> installed local AND two-worker Ray qualification
+  -> release only: protected read-only promotion verification
+  -> minimal PyPI upload -> read-only PyPI verification
+```
+
+The native preparation job emits only `artifacts/vortex.duckdb_extension` and
+the six reviewed notices under `licenses/vortex/`. The signer reads its exact
+official Vane source pin from the committed selected manifest, never from a
+build-produced script or source reference. It installs no Python dependencies,
+does not load the native artifact, and receives only the selected signing key.
+Its wrapper runs with `/usr/bin/python3 -I -S`, checks the public-key DER SHA256,
+unsets the secret before spawning children, and erases temporary key files outside
+all downloaded/uploaded paths. It snapshots the unsigned payload before signing
+and requires that only the final 256-byte DuckDB signature slot changes.
+
+A fresh packaging job independently compares the signed payload with the original
+unsigned prepare artifact, then repeats ELF checks and Vane's native wheel
+verification for all five indexed runtimes. Signing is not a second native build.
+The full in-process builder is restricted to the public `ci-test` fixture key;
+published profiles cannot use it.
+
+Every publishing artifact consumer uses the original producer's immutable
+artifact ID and fails on an archive digest mismatch. The promotion verifier has
+only `contents: read`; dependencies used for validation never share a job with
+publishing OIDC. Each final uploader contains only pinned artifact-download and
+PyPI-publish actions, with no checkout, dependency installation or custom script.
 
 ## First TestPyPI publication (after merge)
 
@@ -78,8 +135,8 @@ The code PR does **not** configure credentials or publish a package.
      --ref v1.5-variegata_vane -f operation=testpypi-dev
    ```
 
-The workflow downloads all five exact indexed dev612 runtime wheels, builds and
-signs one native artifact, qualifies the complete provider matrix, revalidates
+The workflow checks all five exact indexed dev612 runtime wheels, builds and
+signs one native artifact in separate jobs, qualifies the complete provider matrix, revalidates
 the immutable release set, and produces checksums, SBOM, provenance and Sigstore
 evidence. OIDC upload stays in the repository's top-level workflow.
 
@@ -89,10 +146,48 @@ Local and two-worker Ray jobs download the exact selected versions, compare the
 downloaded provider to the assembled artifact, run `pip check`, and execute the
 provider tests. A successful upload alone is not a successful qualification.
 
-The configured TestPyPI limit is 100,000,000 bytes **per wheel**, independent of
-Vane's larger native artifact safety limits. The first CI build must establish
-that the actual compressed Vortex wheel fits; this PR does not assume a measured
-wheel size or silently relax either limit.
+The configured upload limit is 100,000,000 bytes **per wheel**, independent of
+Vane's larger native artifact safety limits. Both publishing indexes must accept
+that budget; neither limit is silently relaxed.
+
+## Production PyPI setup and promotion (after merge)
+
+Environment and publisher setup is an administrator action, separate from this
+code change. No private key, tag, package or ruleset is created by this PR.
+
+1. Keep the existing `testpypi` environment and its Trusted Publisher for staging.
+2. Create `production-signing`, restricted to `v1.5-variegata_vane` with required
+   human approval. Store `VANE_EXTENSION_SIGNING_PRIVATE_KEY` **only there**. It
+   must match trust identity `astrovela/vane` and public DER SHA256
+   `8729fbfbf5276be4b159c0b698c9e4214edd72eaad3e21bcefc03bcb36dffaeb`.
+   The separate development identity `astrovela/vane-testpypi` has public DER
+   SHA256 `53779fb8f9c97e9dec9c66ff838839eb234d1a64d4b105671304820e627b5e32`.
+3. Create `pypi`, restricted to the same branch with required approval, without
+   a native signing secret. Register the production PyPI Trusted Publisher for
+   project `vane-extension-vortex`, owner `AstroVela`, repository `duckdb-vortex`,
+   workflow `VaneExtension.yml`, environment `pypi`.
+4. Publish the exact production-key-aware `vane-ai` release first, update the
+   production manifest through PR, and then dispatch:
+
+   ```sh
+   gh workflow run VaneExtension.yml --repo AstroVela/duckdb-vortex \
+     --ref v1.5-variegata_vane -f operation=release
+   ```
+
+The production artifact is newly built and signed with the production native key,
+then staged on TestPyPI. It is never a renamed or re-signed dev612 wheel. The
+staging tests install `vane-ai` from PyPI and the provider from TestPyPI, compare
+the provider bytes with the original candidate, and exercise both local and Ray
+execution. Only after both pass does the protected promotion verifier recheck the
+complete TestPyPI matrix and reject any conflicting, extra or yanked PyPI files.
+An absent version or byte-identical partial upload is allowed for a retry.
+
+Approve both the read-only `pypi` verifier and the minimal `pypi` uploader when
+GitHub requests them; they are separate jobs and may require separate approvals.
+The uploader promotes the exact original wheel files, without rebuilding,
+re-signing, changing dependencies or relabeling versions. Finally, indexed PyPI
+filenames and SHA256 hashes must match. The workflow creates no provider tag;
+provider versions remain generated by Vane's descriptor-bound wheel builder.
 
 ## Focused developer checks
 
@@ -100,10 +195,11 @@ After static review, use Python 3.11+ (the release tooling interpreter is
 independent of the provider's CPython 3.10–3.14 wheel tags):
 
 ```sh
-python -m pip install -r vane-extension-ci-tools/requirements-release.txt
+python -m pip install -r vane-extension-ci-tools/requirements-release.txt pytest pyyaml
 python -I test/vane/test_vane_dynamic_wheel.py
 python -I test/vane/test_vane_provider_release.py
 python -I test/vane/test_vane_runtime_identity.py
+python -I -m pytest -q test/vane/test_vane_dynamic_signing.py test/vane/test_vane_production_release.py
 ```
 
 No editable install or full local Vane test suite is needed. Native builds and
