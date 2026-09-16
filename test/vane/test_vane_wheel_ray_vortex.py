@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -12,8 +14,11 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
-_HARNESS_ROOT = str(Path(__file__).resolve().parent)
-sys.path.insert(0, _HARNESS_ROOT)
+_HARNESS_PATHS = [
+    str(Path(__file__).resolve().parent),
+    str(Path(__file__).resolve().parents[1] / "object_store"),
+]
+sys.path[:0] = _HARNESS_PATHS
 try:
     from vortex_s3_fault_proxy import S3FaultProxy  # noqa: E402
     from vortex_s3_test_support import (  # noqa: E402
@@ -40,11 +45,27 @@ try:
         vortex_file_list,
     )
 finally:
-    sys.path.remove(_HARNESS_ROOT)
+    for _path in _HARNESS_PATHS:
+        sys.path.remove(_path)
 
-del _HARNESS_ROOT
+del _HARNESS_PATHS, _path
 
 WORKER_COUNT = 2
+
+
+def load_test_extensions(vane: object, connection: object) -> None:
+    if not os.environ.get("VANE_EXPECTED_EXTENSION_TRUST_IDENTITY"):
+        verify_installed_runtime(vane, connection)
+        return
+    path = Path(__file__).with_name("test_vane_dynamic_vortex.py")
+    specification = importlib.util.spec_from_file_location(
+        "test_vane_dynamic_vortex", path
+    )
+    if specification is None or specification.loader is None:
+        raise AssertionError(f"cannot load dynamic qualification helpers: {path}")
+    helpers = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(helpers)
+    helpers.load_dynamic_vortex(vane, connection)
 
 
 def create_two_worker_cluster(ray: object) -> object:
@@ -134,33 +155,6 @@ def assert_vane_worker_topology(
         )
 
     return workers_by_node
-
-
-class AnnotateWorkerNode:
-    """Record the installed Vane package and Ray node that consume each batch."""
-
-    def __call__(self, table: object) -> object:
-        import pyarrow as pa
-        import ray
-        import vane
-
-        module_path = Path(vane.__file__).resolve()
-        prefix = Path(sys.prefix).resolve()
-        try:
-            module_path.relative_to(prefix)
-        except ValueError as error:
-            raise RuntimeError(
-                f"Ray worker did not import Vane from its wheel environment: {module_path}"
-            ) from error
-        time.sleep(0.05)
-        node_id = str(ray.get_runtime_context().get_node_id())
-        return pa.table(
-            {
-                "id": table.column("id"),
-                "worker_node_id": [node_id] * table.num_rows,
-                "vane_module": [str(module_path)] * table.num_rows,
-            }
-        )
 
 
 class FailSelectedVortexWorker:
@@ -804,6 +798,34 @@ def exercise_worker_topology(
     files: list[Path],
 ) -> None:
     vane = harness.vane
+
+    # A local callable travels by value; workers need only the installed wheels.
+    class AnnotateWorkerNode:
+        """Record the installed Vane package and Ray node that consume each batch."""
+
+        def __call__(self, table: object) -> object:
+            import pyarrow as pa
+            import ray
+            import vane
+
+            module_path = Path(vane.__file__).resolve()
+            prefix = Path(sys.prefix).resolve()
+            try:
+                module_path.relative_to(prefix)
+            except ValueError as error:
+                raise RuntimeError(
+                    f"Ray worker did not import Vane from its wheel environment: {module_path}"
+                ) from error
+            time.sleep(0.05)
+            node_id = str(ray.get_runtime_context().get_node_id())
+            return pa.table(
+                {
+                    "id": table.column("id"),
+                    "worker_node_id": [node_id] * table.num_rows,
+                    "vane_module": [str(module_path)] * table.num_rows,
+                }
+            )
+
     # Measure a fresh scan so fixture writes cannot satisfy worker coverage.
     baseline = assert_vane_worker_topology(ray, harness.runner, expected_nodes)
     harness.require_query(
@@ -886,10 +908,23 @@ def exercise_distributed_copy(
     )
 
     loser_path = output / f"{result['copy_output_run_id']}_w_unselected_data.vortex"
-    connection.execute(
-        f"COPY (SELECT 999::BIGINT AS id, 7::INTEGER AS part, 'loser'::VARCHAR AS payload, "
-        f"1::INTEGER AS nullable_value) TO {sql_string(loser_path)} (FORMAT VORTEX)"
+    loser_output = root / "unselected-copy-fixture"
+    loser_output.mkdir()
+    loser_result = harness.require_copy(
+        "unselected attempt fixture",
+        lambda: connection.sql(
+            "SELECT 999::BIGINT AS id, 7::INTEGER AS part, "
+            "'loser'::VARCHAR AS payload, 1::INTEGER AS nullable_value"
+        )
+        .repartition(1)
+        .write_file(str(loser_output), format="vortex"),
+        expected_rows=1,
+        minimum_files=1,
     )
+    require_equal(
+        len(loser_result["files"]), 1, "unselected attempt fixture file count"
+    )
+    shutil.copyfile(str(loser_result["files"][0]["final_path"]), loser_path)
     require_equal(
         connection.execute(
             f"SELECT count(*)::BIGINT FROM read_vortex({sql_string(output / '*.vortex')})"
@@ -1378,7 +1413,7 @@ def main() -> None:
                 "autoload_known_extensions": "false",
             },
         )
-        verify_installed_runtime(vane, connection)
+        load_test_extensions(vane, connection)
         with tempfile.TemporaryDirectory(prefix="vane-vortex-ray-") as temporary:
             root = Path(temporary).resolve()
             files, empty_path = create_vortex_fixture(connection, root / "input")

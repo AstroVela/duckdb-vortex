@@ -466,16 +466,10 @@ def assert_exact_dataset(
 ) -> None:
     files_sql = vortex_file_list(files)
     rows = connection.execute(
-        "SELECT count(*)::BIGINT, count(DISTINCT id)::BIGINT, sum(id)::BIGINT, "
-        "min(id)::BIGINT, max(id)::BIGINT, "
-        "count(*) FILTER (WHERE part IS DISTINCT FROM (id % 8)::INTEGER)::BIGINT, "
-        "count(*) FILTER (WHERE payload IS DISTINCT FROM 'row-' || id::VARCHAR)::BIGINT, "
-        "count(*) FILTER (WHERE "
-        "(id % 11 = 0 AND nullable_value IS NOT NULL) OR "
-        "(id % 11 <> 0 AND nullable_value IS DISTINCT FROM (id * 3)::INTEGER))::BIGINT "
-        f"FROM read_vortex({files_sql})"
+        "SELECT id, part, payload, nullable_value "
+        f"FROM read_vortex({files_sql}) ORDER BY id"
     ).fetchall()
-    require_equal(rows, [(TOTAL_ROWS, TOTAL_ROWS, 8128, 0, 127, 0, 0, 0)], description)
+    require_equal(rows, fixture_rows(), description)
     schema = connection.execute(
         "DESCRIBE SELECT id, part, payload, nullable_value "
         f"FROM read_vortex({files_sql})"

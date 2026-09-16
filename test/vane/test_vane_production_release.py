@@ -595,9 +595,9 @@ def test_all_release_consumers_download_original_immutable_ids():
         )
 
 
-@pytest.mark.parametrize("runner", ["local", "ray"])
-def test_staged_smokes_check_bytes_and_source_derived_runtime_identities(runner):
-    job = JOBS[f"testpypi-{runner}-vortex-integration"]
+@pytest.mark.parametrize("suite", ["smoke", "ray"])
+def test_staged_smokes_check_bytes_and_source_derived_runtime_identities(suite):
+    job = JOBS[f"testpypi-{suite}-vortex-integration"]
     assert job["permissions"] == {"contents": "read"}
     assert "environment" not in job
     environment = job["env"]
