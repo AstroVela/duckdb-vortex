@@ -94,8 +94,8 @@ continues to select `vortex-extension/Cargo.toml`. Both manifests pin
 `AstroVela/vortex@8eedee91dcf630551ab6b5d8705fad3d853a7c33`, which adds the
 common DuckDB-filesystem-backed Vortex writer. The Vane integration manifest
 also pins
-`AstroVela/vane@472df75ab51fd3eac2642f6646545075549e5921`
-(`vane-ai==0.2.0.dev612`). CMake explicitly
+`AstroVela/vane@3c9ed18e29c586e9d5448c74440e8ea55469a749`
+(`vane-ai==0.2.0.dev657`). CMake explicitly
 sets `VORTEX_VANE_DISTRIBUTED=1` only for this lane; both Rust adapters
 translate it to `#[cfg(vortex_vane_distributed)]`, while C++ uses the matching
 `VORTEX_VANE_DISTRIBUTED` definition. The filesystem writer is intentionally
@@ -111,7 +111,7 @@ Rust artifact, so the same entry point works with staticlib and cdylib builds.
 ### Independent Vane provider
 
 `VaneExtension.yml` builds and qualifies the separate
-`vane-extension-vortex` wheel, with exact `vane-ai==0.2.0.dev612` dependencies
+`vane-extension-vortex` wheel, with exact `vane-ai==0.2.0.dev657` dependencies
 for CPython 3.10–3.14 on manylinux_2_28_x86_64. This profile statically embeds
 Rust and DuckDB inside the dynamic artifact but does not link Vortex into the
 base Vane wheel; only `vortex_duckdb_cpp_init` is publicly exported.
@@ -121,7 +121,7 @@ qualification, fixed source identities, first-publisher configuration and the
 protected manual TestPyPI workflow. A separate production manifest prepares
 TestPyPI staging and same-byte PyPI promotion after an actual production-key-aware
 Vane runtime is released. Signing, packaging and publishing use isolated jobs;
-the dev612 contract stays unchanged. Adding the workflow does not itself publish
+the dev657 contract stays unchanged. Adding the workflow does not itself publish
 a package; the existing native/static qualification remains independent.
 
 ### Vane distributed Vortex scans and COPY
@@ -205,7 +205,7 @@ destruction, or leaked lifecycle state. The hosted Vane workflow runs the same
 target in a dedicated read-only CI job.
 
 The hosted workflow then downloads the one verified `vane-vortex-wheel`
-artifact into two independent clean virtual environments. The local-fast gate
+artifact into two independent clean virtual environments. The default Ray gate
 and the two-execution-node Ray gate run from test directories outside the
 checkout with Python isolated mode enabled. Both reject source-tree imports,
 disable DuckDB extension auto-install and auto-load, require Vortex to report
@@ -215,8 +215,8 @@ the cluster starts; they do not install, compile, or download extension code.
 
 The packaged Ray qualification covers single, list, and glob scans; schema and
 content; projection, filter, aggregate, and `file_index` pruning; empty input;
-repeated relation-plan execution; and comparison with the coordinator's native
-DuckDB result. It also kills a real Vane worker actor while a Vortex split is
+repeated relation-plan execution; and comparison of SQL and Relation APIs against
+independent Python expectations. It also kills a real Vane worker actor while a Vortex split is
 running and requires the replacement worker to finish attempt 1 with the exact
 replayed result. Distributed COPY covers multiple selected worker files, an
 empty output, failed-task cleanup and explicit retry, committed-manifest

@@ -37,7 +37,10 @@ class RuntimeIdentityTest(unittest.TestCase):
         self.vane = SimpleNamespace(
             __file__=str(Path(sys.prefix) / "lib/vane/__init__.py"),
             __git_revision__=RUNTIME_SOURCE_ID,
-            __version__="0.2.0.dev612",
+            __version__="0.2.0.dev657",
+            runners=SimpleNamespace(
+                get_or_create_runner=lambda: SimpleNamespace(name="ray")
+            ),
         )
         self.connection = mock.Mock()
         self.connection.execute.return_value.fetchone.return_value = (
@@ -94,8 +97,7 @@ class RuntimeIdentityTest(unittest.TestCase):
 
     def test_static_harness_accepts_the_native_runtime_identity(self) -> None:
         environment = {
-            "VANE_RUNNER": "local-fast",
-            "VANE_EXPECTED_REVISION": "472df75ab51fd3eac2642f6646545075549e5921",
+            "VANE_EXPECTED_REVISION": "3c9ed18e29c586e9d5448c74440e8ea55469a749",
             "VANE_EXPECTED_PACKAGE_VERSION": self.vane.__version__,
             "VANE_EXPECTED_FORK_VERSION": FORK_VERSION,
             "VANE_EXPECTED_DUCKDB_SOURCE_ID": SOURCE_TREE_ID,
@@ -115,9 +117,7 @@ class RuntimeIdentityTest(unittest.TestCase):
             mock.patch.dict(os.environ, environment, clear=True),
             redirect_stdout(io.StringIO()),
         ):
-            identity = self.helpers.verify_installed_runtime(
-                self.vane, self.connection, "local-fast"
-            )
+            identity = self.helpers.verify_installed_runtime(self.vane, self.connection)
         self.assertEqual(identity["source_id"], RUNTIME_SOURCE_ID)
 
     def test_dynamic_harness_checks_identity_before_provider_discovery(self) -> None:

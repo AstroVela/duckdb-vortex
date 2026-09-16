@@ -27,6 +27,8 @@ try:
         TOTAL_ROWS,
         assert_exact_dataset,
         create_vortex_fixture,
+        expected_scan_rows,
+        fixture_rows,
         require_equal,
         require_error,
         require_true,
@@ -86,8 +88,11 @@ def execution_node_ids(ray: object) -> set[str]:
 
 
 def assert_vane_worker_topology(
-    ray: object, runner: object, expected_nodes: set[str]
-) -> None:
+    ray: object,
+    runner: object,
+    expected_nodes: set[str],
+    baseline: dict[str, dict[str, object]] | None = None,
+) -> dict[str, dict[str, object]]:
     client = runner.query_driver_client
     if client is None:
         raise AssertionError("the Ray runner did not create a query driver client")
@@ -118,13 +123,17 @@ def assert_vane_worker_topology(
     )
     for node_id, worker_stats in workers_by_node.items():
         require_true(
-            int(worker_stats.get("registered_total", 0)) > 0,
+            int(worker_stats.get("registered_total", 0))
+            > int((baseline or {}).get(node_id, {}).get("registered_total", 0)),
             f"Vane worker on {node_id} registered no Vortex fragments",
         )
         require_true(
-            int(worker_stats.get("lookup_hits", 0)) > 0,
+            int(worker_stats.get("lookup_hits", 0))
+            > int((baseline or {}).get(node_id, {}).get("lookup_hits", 0)),
             f"Vane worker on {node_id} executed no registered Vortex fragments",
         )
+
+    return workers_by_node
 
 
 class AnnotateWorkerNode:
@@ -177,27 +186,41 @@ class RayVortexHarness:
         self._original_run_iter_tables = runner.run_iter_tables
         self._original_run_write = runner.run_write
 
-        def record_distributed_read(*args: object, **kwargs: object) -> object:
+        def record_distributed_read(logical_plan: object) -> object:
+            require_true(
+                isinstance(logical_plan, vane.ray_cxx.PyLogicalPlan),
+                "bound Ray read plan",
+            )
             self.read_dispatch_count += 1
-            return self._original_run_iter_tables(*args, **kwargs)
+            return self._original_run_iter_tables(logical_plan)
 
-        def record_distributed_write(*args: object, **kwargs: object) -> object:
+        def record_distributed_write(logical_plan: object) -> object:
+            require_true(
+                isinstance(logical_plan, vane.ray_cxx.PyLogicalPlan),
+                "bound Ray write plan",
+            )
             self.write_dispatch_count += 1
-            result = self._original_run_write(*args, **kwargs)
+            self.last_write_result = None
+            result = self._original_run_write(logical_plan)
             self.last_write_result = result
             return result
 
         runner.run_iter_tables = record_distributed_read
         runner.run_write = record_distributed_write
 
-    def require_query(self, query: str, description: str) -> list[tuple[object, ...]]:
-        native_rows = self.connection.execute(query).fetchall()
+    def require_query(
+        self, query: str, description: str, expected: list[tuple[object, ...]]
+    ) -> list[tuple[object, ...]]:
         previous_count = self.read_dispatch_count
+        sql_rows = self.connection.execute(query).fetchall()
         distributed_rows = self.connection.sql(query).fetchall()
         require_equal(
-            self.read_dispatch_count, previous_count + 1, f"{description} Ray dispatch"
+            self.read_dispatch_count,
+            previous_count + 2,
+            f"{description} SQL and Relation Ray dispatch",
         )
-        require_equal(distributed_rows, native_rows, f"{description} native comparison")
+        require_equal(sql_rows, expected, f"{description} SQL result")
+        require_equal(distributed_rows, expected, f"{description} Relation result")
         return distributed_rows
 
     def physical_plan(self, query: str) -> object:
@@ -316,7 +339,9 @@ class RayVortexHarness:
                 f"{description} selected file is missing",
             )
             require_true(
-                all(Path(path).name.startswith(f"{run_id}_") for path in selected_paths),
+                all(
+                    Path(path).name.startswith(f"{run_id}_") for path in selected_paths
+                ),
                 f"{description} selected path does not carry the run identity",
             )
 
@@ -331,8 +356,7 @@ class RayVortexHarness:
             )
         else:
             committed_paths = sorted(
-                Path(str(entry["final_path"])).resolve()
-                for entry in committed["files"]
+                Path(str(entry["final_path"])).resolve() for entry in committed["files"]
             )
         require_equal(
             committed.get("rows_copied"),
@@ -780,9 +804,14 @@ def exercise_worker_topology(
     files: list[Path],
 ) -> None:
     vane = harness.vane
-    # The runner has only executed Vortex reads at this point, so these
-    # counters cannot be satisfied by the UDF fragment below.
-    assert_vane_worker_topology(ray, harness.runner, expected_nodes)
+    # Measure a fresh scan so fixture writes cannot satisfy worker coverage.
+    baseline = assert_vane_worker_topology(ray, harness.runner, expected_nodes)
+    harness.require_query(
+        f"SELECT id FROM read_vortex({vortex_file_list(files)}) ORDER BY id",
+        "worker topology scan",
+        [(value,) for value in range(TOTAL_ROWS)],
+    )
+    assert_vane_worker_topology(ray, harness.runner, expected_nodes, baseline)
     previous_count = harness.read_dispatch_count
     relation = harness.connection.sql(
         f"SELECT id FROM read_vortex({vortex_file_list(files)})"
@@ -890,6 +919,7 @@ def exercise_distributed_copy(
         "SELECT id, part, payload, nullable_value "
         f"FROM read_vortex({vortex_file_list(committed_paths)}) ORDER BY id",
         "distributed COPY Ray readback",
+        fixture_rows(),
     )
 
     empty_output = root / "distributed-empty-copy"
@@ -1032,7 +1062,9 @@ def _require_remote_committed_readback(
         declared_rows += int(row_count)
         bucket, key = parse_s3_uri(uri)
         require_equal(bucket, config.bucket, f"{description} selected bucket")
-        require_true(key not in selected_keys, f"{description} selected a duplicate key")
+        require_true(
+            key not in selected_keys, f"{description} selected a duplicate key"
+        )
         selected_keys.add(key)
         local_path = download_root / f"part-{index:02d}.vortex"
         config.download(uri, local_path)
@@ -1118,9 +1150,7 @@ def _exercise_object_store_copy_through_proxy(
         sorted(first_keys),
         "distributed S3 COPY retained only selected attempt objects",
     )
-    assert_credentials_absent(
-        stored_after_first, config, "distributed S3 object names"
-    )
+    assert_credentials_absent(stored_after_first, config, "distributed S3 object names")
 
     second = harness.require_copy(
         "second distributed S3 Vortex COPY",
@@ -1195,9 +1225,7 @@ def _exercise_object_store_copy_through_proxy(
                 config,
                 f"distributed S3 Vortex COPY {stage} retained metadata",
             )
-        retained_manifests = [
-            key for key in remaining if key.endswith("/manifest.txt")
-        ]
+        retained_manifests = [key for key in remaining if key.endswith("/manifest.txt")]
         run_ids = _copy_run_ids_from_lifecycle_keys(base_key, remaining)
         if stage in {"manifest", "marker"}:
             require_equal(
@@ -1275,7 +1303,9 @@ def _exercise_object_store_copy_through_proxy(
             f"distributed S3 Vortex COPY {stage} reconciled cleanup",
         )
 
-    require_true(bool(failed_marker_base), "marker fault did not expose a retryable run")
+    require_true(
+        bool(failed_marker_base), "marker fault did not expose a retryable run"
+    )
     retry = harness.require_copy(
         "distributed S3 Vortex COPY retry after force-abort",
         lambda: connection.sql(source_query).write_file(
@@ -1322,10 +1352,8 @@ def exercise_object_store_copy(
 
 
 def main() -> None:
-    if os.environ.get("VANE_RUNNER") != "ray":
-        raise RuntimeError(
-            "the distributed wheel qualification requires VANE_RUNNER=ray"
-        )
+    if "VANE_RUNNER" in os.environ:
+        raise RuntimeError("leave VANE_RUNNER unset to qualify the default Ray runner")
     os.environ["VANE_FTE_DYNAMIC_SCAN_MAX_SPLITS_PER_PARTITION"] = "1"
     os.environ["VANE_FTE_RETRY_INITIAL_DELAY_S"] = "0"
     os.environ["VANE_FTE_STATUS_WAIT_TIMEOUT_S"] = "5"
@@ -1341,7 +1369,6 @@ def main() -> None:
 
     cluster = create_two_worker_cluster(ray)
     connection = None
-    runner_configured = False
     try:
         expected_nodes = execution_node_ids(ray)
         connection = vane.connect(
@@ -1351,7 +1378,7 @@ def main() -> None:
                 "autoload_known_extensions": "false",
             },
         )
-        verify_installed_runtime(vane, connection, "ray")
+        verify_installed_runtime(vane, connection)
         with tempfile.TemporaryDirectory(prefix="vane-vortex-ray-") as temporary:
             root = Path(temporary).resolve()
             files, empty_path = create_vortex_fixture(connection, root / "input")
@@ -1366,12 +1393,8 @@ def main() -> None:
                 expected_nodes,
             )
 
-            vane.set_runner_ray(noop_if_initialized=True)
-            runner_configured = True
             runner = runners.get_or_create_runner()
-            require_equal(
-                getattr(runner, "name", None), "ray", "configured Vane runner"
-            )
+            require_equal(getattr(runner, "name", None), "ray", "default Vane runner")
             harness = RayVortexHarness(vane, connection, runner)
 
             files_sql = vortex_file_list(files)
@@ -1415,13 +1438,15 @@ def main() -> None:
             )
 
             for description, query in scan_cases(files, empty_path):
-                harness.require_query(query, f"distributed {description}")
+                harness.require_query(
+                    query, f"distributed {description}", expected_scan_rows(description)
+                )
 
             repeated_query = (
                 "SELECT id, payload FROM read_vortex("
                 f"{vortex_file_list(files)}) WHERE id BETWEEN 41 AND 77 ORDER BY id"
             )
-            repeated_expected = connection.execute(repeated_query).fetchall()
+            repeated_expected = [(i, f"row-{i}") for i in range(41, 78)]
             repeated_relation = connection.sql(repeated_query)
             previous_reads = harness.read_dispatch_count
             require_equal(
@@ -1457,8 +1482,7 @@ def main() -> None:
                 connection.close()
         finally:
             try:
-                if runner_configured:
-                    vane.teardown_runner()
+                vane.teardown_runner()
             finally:
                 if ray.is_initialized():
                     ray.shutdown()

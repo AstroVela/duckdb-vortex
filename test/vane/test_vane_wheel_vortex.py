@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise statically linked Vortex from a clean installed Vane wheel."""
+"""Exercise the statically linked Vortex wheel with Vane's default Ray runner."""
 
 from __future__ import annotations
 
@@ -8,103 +8,95 @@ import sys
 import tempfile
 from pathlib import Path
 
-_HARNESS_ROOT = str(Path(__file__).resolve().parent)
-sys.path.insert(0, _HARNESS_ROOT)
+_harness_paths = [
+    str(Path(__file__).resolve().parent),
+    str(Path(__file__).resolve().parents[1] / "object_store"),
+]
+sys.path[:0] = _harness_paths
 try:
-    from vortex_wheel_test_support import (  # noqa: E402
-        assert_exact_dataset,
-        create_vortex_fixture,
-        require_equal,
-        require_true,
-        scan_cases,
-        sql_string,
-        verify_installed_runtime,
-        verify_known_case_results,
-        verify_scan_schema,
-        vortex_file_list,
-    )
+    import test_vane_wheel_ray_vortex as ray_helpers
+    import vortex_wheel_test_support as helpers
 finally:
-    sys.path.remove(_HARNESS_ROOT)
-
-del _HARNESS_ROOT
+    for _path in _harness_paths:
+        sys.path.remove(_path)
+del _harness_paths, _path
 
 
 def main() -> None:
-    if os.environ.get("VANE_RUNNER") != "local-fast":
-        raise RuntimeError(
-            "the local wheel qualification requires VANE_RUNNER=local-fast"
-        )
+    if "VANE_RUNNER" in os.environ:
+        raise RuntimeError("leave VANE_RUNNER unset to qualify the default Ray runner")
 
+    import ray
     import vane
+    from vane import runners
 
-    connection = vane.connect(
-        ":memory:",
-        config={
-            "autoinstall_known_extensions": "false",
-            "autoload_known_extensions": "false",
-        },
-    )
+    if ray.is_initialized():
+        raise RuntimeError("the wheel smoke must own its Ray cluster")
+    cluster = ray_helpers.create_two_worker_cluster(ray)
+    connection = None
     try:
-        verify_installed_runtime(vane, connection, "local-fast")
-        with tempfile.TemporaryDirectory(prefix="vane-vortex-local-") as temporary:
-            root = Path(temporary).resolve()
-            files, empty_path = create_vortex_fixture(connection, root / "input")
-            verify_scan_schema(connection, files, empty_path)
-            verify_known_case_results(connection, files, empty_path)
-
-            for description, query in scan_cases(files, empty_path):
-                native_rows = connection.execute(query).fetchall()
-                local_fast_rows = connection.sql(query).fetchall()
-                require_equal(local_fast_rows, native_rows, f"local-fast {description}")
-
-            repeated_query = (
-                "SELECT id, payload FROM read_vortex("
-                f"{vortex_file_list(files)}) WHERE id BETWEEN 41 AND 77 ORDER BY id"
+        runner = runners.get_or_create_runner()
+        helpers.require_equal(runner.name, "ray", "default runner")
+        connection = vane.connect(
+            ":memory:",
+            config={
+                "autoinstall_known_extensions": "false",
+                "autoload_known_extensions": "false",
+            },
+        )
+        helpers.verify_installed_runtime(vane, connection)
+        with tempfile.TemporaryDirectory(prefix="vane-vortex-smoke-") as value:
+            root = Path(value).resolve()
+            files, empty_path = helpers.create_vortex_fixture(
+                connection, root / "input"
             )
-            repeated_relation = connection.sql(repeated_query)
-            repeated_expected = connection.execute(repeated_query).fetchall()
-            require_equal(
-                repeated_relation.fetchall(),
-                repeated_expected,
-                "first prepared relation execution",
+            helpers.verify_scan_schema(connection, files, empty_path)
+            harness = ray_helpers.RayVortexHarness(vane, connection, runner)
+            for description, query in helpers.scan_cases(files, empty_path):
+                harness.require_query(
+                    query, description, helpers.expected_scan_rows(description)
+                )
+            output = root / "copy"
+            output.mkdir()
+            receipt = harness.require_copy(
+                "default Ray Vortex COPY",
+                lambda: connection.sql(
+                    "SELECT id, part, payload, nullable_value "
+                    f"FROM read_vortex({helpers.vortex_file_list(files)})"
+                ).write_file(str(output), format="vortex"),
+                expected_rows=helpers.TOTAL_ROWS,
+                minimum_files=1,
             )
-            require_equal(
-                repeated_relation.fetchall(),
-                repeated_expected,
-                "repeated prepared relation execution",
+            selected = [Path(entry["final_path"]) for entry in receipt["files"]]
+            helpers.assert_exact_dataset(
+                connection, selected, "default Ray COPY readback"
             )
-
-            output_path = root / "local-copy.vortex"
-            connection.sql(
-                "SELECT id, part, payload, nullable_value "
-                f"FROM read_vortex({vortex_file_list(files)})"
-            ).write_file(str(output_path), format="vortex")
-            require_true(
-                output_path.is_file(),
-                "local-fast Vortex COPY did not create its output",
+            empty_output = root / "empty-copy"
+            empty_output.mkdir()
+            empty = harness.require_copy(
+                "default Ray empty COPY",
+                lambda: connection.sql(
+                    f"SELECT * FROM read_vortex({helpers.sql_string(empty_path)})"
+                ).write_file(str(empty_output), format="vortex"),
+                expected_rows=0,
+                minimum_files=1,
             )
-            assert_exact_dataset(
-                connection, [output_path], "local-fast Vortex COPY readback"
-            )
-
-            empty_output = root / "local-empty-copy.vortex"
-            connection.sql(
-                "SELECT id, part, payload, nullable_value "
-                f"FROM read_vortex({sql_string(empty_path)})"
-            ).write_file(str(empty_output), format="vortex")
-            require_true(
-                empty_output.is_file(),
-                "local-fast empty COPY did not create a Vortex file",
-            )
-            require_equal(
-                connection.execute(
-                    f"SELECT count(*)::BIGINT FROM read_vortex({sql_string(empty_output)})"
-                ).fetchall(),
+            empty_files = [Path(entry["final_path"]) for entry in empty["files"]]
+            harness.require_query(
+                f"SELECT count(*) FROM read_vortex({helpers.vortex_file_list(empty_files)})",
+                "default Ray empty COPY readback",
                 [(0,)],
-                "local-fast empty COPY readback",
             )
     finally:
-        connection.close()
+        try:
+            if connection is not None:
+                connection.close()
+        finally:
+            try:
+                vane.teardown_runner()
+            finally:
+                ray.shutdown()
+                cluster.shutdown()
 
 
 if __name__ == "__main__":

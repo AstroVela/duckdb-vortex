@@ -25,9 +25,9 @@ permissions:
   contents: read
 
 env:
-  VANE_EXPECTED_PACKAGE_VERSION: 0.2.0.dev612
-  VANE_EXPECTED_FORK_VERSION: v1.5.5-vane.4bd8e72338
-  VANE_EXPECTED_DUCKDB_SOURCE_ID: edb8047859d9d5c443f46e86e6b5e507b5026944
+  VANE_EXPECTED_PACKAGE_VERSION: 0.2.0.dev657
+  VANE_EXPECTED_FORK_VERSION: v1.5.5-vane.3c9ed18e29
+  VANE_EXPECTED_DUCKDB_SOURCE_ID: bfb327b3335816973f336c8ac59ce63f41bb4968
 
 jobs:
   vane-provider-release-tooling:
@@ -340,14 +340,13 @@ jobs:
 
   vane-dynamic-vortex-integration:
     if: inputs.operation != 'testpypi-dev' && inputs.operation != 'release'
-    name: Vane dynamic wheel local Vortex integration
+    name: Vane dynamic wheel default Ray Vortex smoke
     needs: vane-dynamic-wheel
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
     env:
-      VANE_RUNNER: local-fast
       VANE_EXPECTED_EXTENSION_TRUST_IDENTITY: vane-ci-test-key
 
     steps:
@@ -381,7 +380,7 @@ jobs:
           test "${#vortex_wheels[@]}" -eq 1
           python -m pip install --disable-pip-version-check \
             "${base_wheels[0]}" "${vortex_wheels[0]}"
-          python -I test/vane/test_vane_dynamic_vortex.py
+          python -I test/vane/test_vane_dynamic_vortex.py --smoke
 
   vane-dynamic-ray-vortex-integration:
     if: inputs.operation != 'testpypi-dev' && inputs.operation != 'release'
@@ -392,7 +391,6 @@ jobs:
     permissions:
       contents: read
     env:
-      VANE_RUNNER: ray
       VANE_EXPECTED_EXTENSION_TRUST_IDENTITY: vane-ci-test-key
       RAY_DEDUP_LOGS: "0"
       VANE_UDF_TARGET_MAX_BATCH_BYTES: "4096"
@@ -1174,15 +1172,14 @@ jobs:
             --directory dist --index testpypi \
             --version "${{ needs.assemble-testpypi-vortex.outputs.vortex_version }}"
 
-  testpypi-local-vortex-integration:
-    name: TestPyPI local Vortex integration
+  testpypi-smoke-vortex-integration:
+    name: TestPyPI default Ray Vortex smoke
     needs: [assemble-testpypi-vortex, verify-testpypi-vortex]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
     env:
-      VANE_RUNNER: local-fast
       VANE_EXPECTED_EXTENSION_TRUST_IDENTITY: ${{ inputs.operation == 'release' && 'astrovela/vane' || 'astrovela/vane-testpypi' }}
       VANE_EXPECTED_PACKAGE_VERSION: ${{ needs.assemble-testpypi-vortex.outputs.vane_version }}
       VANE_EXPECTED_FORK_VERSION: ${{ needs.assemble-testpypi-vortex.outputs.fork_version }}
@@ -1217,8 +1214,8 @@ jobs:
           VORTEX_VERSION: ${{ needs.assemble-testpypi-vortex.outputs.vortex_version }}
         run: |
           set -euo pipefail
-          python -m venv .venv-vane-testpypi-local
-          . .venv-vane-testpypi-local/bin/activate
+          python -m venv .venv-vane-testpypi-smoke
+          . .venv-vane-testpypi-smoke/bin/activate
           unset PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_FIND_LINKS
           export PIP_CONFIG_FILE=/dev/null
           python -m pip install --upgrade pip
@@ -1255,8 +1252,8 @@ jobs:
           python -m pip install "${base_wheels[0]}" "${vortex_wheels[0]}"
           python -m pip check
 
-      - name: Exercise the indexed provider locally
-        run: .venv-vane-testpypi-local/bin/python -I test/vane/test_vane_dynamic_vortex.py
+      - name: Exercise the indexed provider with default Ray
+        run: .venv-vane-testpypi-smoke/bin/python -I test/vane/test_vane_dynamic_vortex.py --smoke
 
   testpypi-ray-vortex-integration:
     name: TestPyPI two-worker Ray Vortex integration
@@ -1266,7 +1263,6 @@ jobs:
     permissions:
       contents: read
     env:
-      VANE_RUNNER: ray
       VANE_EXPECTED_EXTENSION_TRUST_IDENTITY: ${{ inputs.operation == 'release' && 'astrovela/vane' || 'astrovela/vane-testpypi' }}
       VANE_EXPECTED_PACKAGE_VERSION: ${{ needs.assemble-testpypi-vortex.outputs.vane_version }}
       VANE_EXPECTED_FORK_VERSION: ${{ needs.assemble-testpypi-vortex.outputs.fork_version }}
@@ -1349,7 +1345,7 @@ jobs:
     name: Approve and verify the immutable Vortex promotion without OIDC
     needs:
       - assemble-testpypi-vortex
-      - testpypi-local-vortex-integration
+      - testpypi-smoke-vortex-integration
       - testpypi-ray-vortex-integration
     runs-on: ubuntu-24.04
     timeout-minutes: 20

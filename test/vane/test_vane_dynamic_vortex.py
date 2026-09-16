@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Qualify the installed Vortex provider locally or on two actual Ray workers."""
+"""Qualify the installed Vortex provider with the default Ray runner."""
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -142,42 +143,7 @@ def provider_connection(vane: object) -> tuple[object, dict[str, object]]:
         raise
 
 
-def exercise_local(vane: object, root: Path) -> None:
-    connection, _descriptor = provider_connection(vane)
-    try:
-        files, empty_path = helpers.create_vortex_fixture(connection, root / "input")
-        helpers.verify_scan_schema(connection, files, empty_path)
-        helpers.verify_known_case_results(connection, files, empty_path)
-        for description, query in helpers.scan_cases(files, empty_path):
-            require_equal(
-                connection.sql(query).fetchall(),
-                connection.execute(query).fetchall(),
-                f"local dynamic Vortex {description}",
-            )
-        output = root / "local-copy.vortex"
-        connection.sql(
-            "SELECT id, part, payload, nullable_value "
-            f"FROM read_vortex({helpers.vortex_file_list(files)})"
-        ).write_file(str(output), format="vortex")
-        helpers.assert_exact_dataset(
-            connection, [output], "local dynamic COPY readback"
-        )
-        empty_output = root / "local-empty.vortex"
-        connection.sql(
-            f"SELECT * FROM read_vortex({sql_string(empty_path)})"
-        ).write_file(str(empty_output), format="vortex")
-        require_equal(
-            connection.execute(
-                f"SELECT count(*) FROM read_vortex({sql_string(empty_output)})"
-            ).fetchone(),
-            (0,),
-            "local empty dynamic COPY",
-        )
-    finally:
-        connection.close()
-
-
-def exercise_ray(vane: object, root: Path) -> None:
+def exercise_ray(vane: object, root: Path, *, smoke: bool) -> None:
     import ray
     from vane import runners
 
@@ -190,9 +156,10 @@ def exercise_ray(vane: object, root: Path) -> None:
         expected_nodes = ray_helpers.execution_node_ids(ray)
         connection, descriptor = provider_connection(vane)
         files, empty_path = helpers.create_vortex_fixture(connection, root / "input")
-        vane.set_runner_ray(noop_if_initialized=True)
+        helpers.verify_scan_schema(connection, files, empty_path)
+        helpers.verify_known_case_results(connection, files, empty_path)
         runner = runners.get_or_create_runner()
-        require_equal(getattr(runner, "name", None), "ray", "configured runner")
+        require_equal(getattr(runner, "name", None), "ray", "default runner")
         harness = ray_helpers.RayVortexHarness(vane, connection, runner)
         source_query = (
             "SELECT id, part, payload, nullable_value "
@@ -209,12 +176,16 @@ def exercise_ray(vane: object, root: Path) -> None:
             [descriptor],
             "worker preparation manifest",
         )
-        for description, query in helpers.scan_cases(files, empty_path):
-            harness.require_query(query, f"dynamic provider {description}")
+        cases = helpers.scan_cases(files, empty_path)
+        for description, query in cases[:1] if smoke else cases:
+            harness.require_query(
+                query,
+                f"dynamic provider {description}",
+                helpers.expected_scan_rows(description),
+            )
 
-        # No UDF or unrelated source has run: both persistent workers must have
-        # looked up and executed their Vortex scan fragments after preparation.
-        ray_helpers.assert_vane_worker_topology(ray, runner, expected_nodes)
+        if not smoke:
+            ray_helpers.exercise_worker_topology(harness, ray, expected_nodes, files)
         output = root / "ray-copy"
         output.mkdir()
         result = harness.require_copy(
@@ -235,6 +206,7 @@ def exercise_ray(vane: object, root: Path) -> None:
             "SELECT id, part, payload, nullable_value "
             f"FROM read_vortex({helpers.vortex_file_list(selected)}) ORDER BY id",
             "dynamic COPY Ray readback",
+            helpers.fixture_rows(),
         )
         empty_output = root / "ray-empty-copy"
         empty_output.mkdir()
@@ -275,23 +247,18 @@ def exercise_ray(vane: object, root: Path) -> None:
 
 
 def main() -> None:
-    runner_kind = os.environ.get("VANE_RUNNER")
-    if runner_kind not in {"local-fast", "ray"}:
-        raise RuntimeError(
-            "dynamic Vortex qualification requires VANE_RUNNER=local-fast or ray"
-        )
+    if "VANE_RUNNER" in os.environ:
+        raise RuntimeError("leave VANE_RUNNER unset to qualify the default Ray runner")
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--smoke", action="store_true", help="Run the default Ray read/write smoke"
+    )
+    arguments = parser.parse_args()
     os.environ["VANE_FTE_DYNAMIC_SCAN_MAX_SPLITS_PER_PARTITION"] = "1"
     import vane
 
-    try:
-        with tempfile.TemporaryDirectory(prefix="vane-dynamic-vortex-") as value:
-            root = Path(value).resolve()
-            if runner_kind == "local-fast":
-                exercise_local(vane, root)
-            else:
-                exercise_ray(vane, root)
-    finally:
-        vane.teardown_runner()
+    with tempfile.TemporaryDirectory(prefix="vane-dynamic-vortex-") as value:
+        exercise_ray(vane, Path(value).resolve(), smoke=arguments.smoke)
 
 
 if __name__ == "__main__":
