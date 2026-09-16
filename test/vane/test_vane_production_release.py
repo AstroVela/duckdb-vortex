@@ -63,7 +63,7 @@ def test_production_manifest_preserves_every_other_source_contract(future_revisi
         # A later release changes only this source pin, not the trust-key floor.
         prod["vane"]["revision"] = future_revision
     assert dev["schema_version"] == prod["schema_version"] == 2
-    assert dev["vane"]["revision"] == "b96fe5e26158646711509b1db3874e476f911684"
+    assert dev["vane"]["revision"] == "4e12994a2fed5b872a7bdb44df72c1b9c5653cdc"
     assert re.fullmatch(r"[0-9a-f]{40}", prod["vane"]["revision"])
     prod["vane"]["revision"] = dev["vane"]["revision"]
     assert prod == dev

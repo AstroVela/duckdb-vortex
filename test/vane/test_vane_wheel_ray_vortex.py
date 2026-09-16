@@ -389,6 +389,7 @@ class _NativeTaskCaptureBackend:
         self.query_id = query_id
         self.tasks: list[object] = []
         self.exhausted_source_ids: set[str] = set()
+        self.finished_queries: list[str] = []
 
     def register_query_owner(self, query_id: str, owner_query_id: str) -> None:
         require_equal(query_id, self.query_id, "captured task execution query")
@@ -433,6 +434,10 @@ class _NativeTaskCaptureBackend:
                 }
             )
         return status
+
+    def task_production_finished(self, query_id: str) -> None:
+        require_equal(query_id, self.query_id, "captured task production query")
+        self.finished_queries.append(query_id)
 
     def drop_query(self, query_id: str) -> None:
         require_equal(query_id, self.query_id, "captured task dropped query")
@@ -488,6 +493,11 @@ def produce_native_scan_worker_task(
             "captured Vortex worker task produced coordinator output",
         )
         require_equal(len(backend.tasks), 1, "captured Vortex worker task count")
+        require_equal(
+            backend.finished_queries,
+            [query_id],
+            "captured root task production completed once",
+        )
         task = backend.tasks[0]
         context = dict(task.context())
         require_equal(context.get("query_id"), query_id, "captured task query id")
