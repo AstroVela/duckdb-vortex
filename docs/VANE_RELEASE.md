@@ -10,10 +10,10 @@ git submodule update --init --recursive
 
 ## Fixed development candidate
 
-- Vane: `3c9ed18e29c586e9d5448c74440e8ea55469a749`
-  (`vane-ai==0.2.0.dev657`).
-- Full DuckDB source tree ID: `bfb327b3335816973f336c8ac59ce63f41bb4968`;
-  native runtime SourceID: `bfb327b333`.
+- Vane: `b96fe5e26158646711509b1db3874e476f911684`
+  (`vane-ai==0.2.0.dev658`).
+- Full DuckDB source tree ID: `307478668842b4b07009e8975d381e2e57b370b8`;
+  native runtime SourceID: `3074786688`.
 - Vortex Rust fork: `8eedee91dcf630551ab6b5d8705fad3d853a7c33`.
 - Rust: `1.97.1`, with the committed Vane adapter Cargo.lock.
 - Extension vcpkg: `74e6536215718009aae747d86d84b78376bf9e09`.
@@ -28,13 +28,13 @@ publication requires that exact Vane runtime to be available on the selected
 index first; changing the source pin does not publish it.
 
 The separate `vane-extension-release.toml` currently pins Vane
-`3c9ed18e29c586e9d5448c74440e8ea55469a749`, which includes the production
+`b96fe5e26158646711509b1db3874e476f911684`, which includes the production
 native trust root introduced by `033b549afcb498633fd6669b26c054c00363004e`. **This is preparation, not a released runtime.** The
 `release` operation intentionally fails its read-only preflight with this
 development source version, before a native build or signing approval.
 Before the first production candidate, replace only the release manifest's Vane
 pin through a reviewed PR with an exact, actually published PyPI runtime commit
-that includes the production-key commit. The dev657 manifest is unchanged.
+that includes the production-key commit. The dev658 manifest is unchanged.
 
 The preflight requires a protected manual dispatch from this repository's
 `v1.5-variegata_vane` branch, derives the canonical runtime version from full
@@ -75,7 +75,7 @@ workers, and verifies distributed COPY and empty COPY readback. Both CI and
 post-upload tests use installed wheels and isolated Python processes.
 The dynamic tests receive the exact runtime version, fork version and full
 DuckDB source tree ID from the selected source, so production does not reuse
-hard-coded dev657 expectations or skip native identity checks.
+hard-coded dev658 expectations or skip native identity checks.
 
 ## Signing and publication boundaries
 
@@ -124,7 +124,7 @@ The code PR does **not** configure credentials or publish a package.
    `v1.5-variegata_vane`, and require an authorized human reviewer.
 2. Configure the environment secret
    `VANE_TESTPYPI_EXTENSION_SIGNING_PRIVATE_KEY` with the existing private key
-   for trust identity `astrovela/vane-testpypi`, matching dev657. Do not commit,
+   for trust identity `astrovela/vane-testpypi`, matching dev658. Do not commit,
    print or rotate this key as part of provider publication.
 3. In TestPyPI, configure the Trusted Publisher:
    project `vane-extension-vortex`, owner `AstroVela`,
@@ -137,7 +137,7 @@ The code PR does **not** configure credentials or publish a package.
      --ref v1.5-variegata_vane -f operation=testpypi-dev
    ```
 
-The workflow checks all five exact indexed dev657 runtime wheels, builds and
+The workflow checks all five exact indexed dev658 runtime wheels, builds and
 signs one native artifact in separate jobs, qualifies the complete provider matrix, revalidates
 the immutable release set, and produces checksums, SBOM, provenance and Sigstore
 evidence. OIDC upload stays in the repository's top-level workflow.
@@ -177,7 +177,7 @@ code change. No private key, tag, package or ruleset is created by this PR.
    ```
 
 The production artifact is newly built and signed with the production native key,
-then staged on TestPyPI. It is never a renamed or re-signed dev657 wheel. The
+then staged on TestPyPI. It is never a renamed or re-signed dev658 wheel. The
 staging tests install `vane-ai` from PyPI and the provider from TestPyPI, compare
 the provider bytes with the original candidate, and exercise both default Ray smoke and two-worker
 execution. Only after both pass does the protected promotion verifier recheck the
@@ -209,7 +209,12 @@ installed default Ray smoke/two-worker integration run in the PR workflows.
 
 ## Default Ray qualification
 
-Both manifests pin Vane `3c9ed18e29c586e9d5448c74440e8ea55469a749`.
+Both manifests pin Vane `b96fe5e26158646711509b1db3874e476f911684`.
+This extends main `3c9ed18e29c586e9d5448c74440e8ea55469a749` with the
+schema-only chunk fix tracked in [Vane #827](https://github.com/AstroVela/vane/issues/827).
+That fix removes the zero-byte allocation assertion exposed by the native
+ASAN lifecycle lane and preserves empty nested results during profiling and
+debug verification.
 All public integration entry points require `VANE_RUNNER` to be absent and
 verify the default Ray runner without calling a runner-selection API. Fixture
 writes also use Ray. COPY checks inspect committed file receipts, and fixture
