@@ -224,11 +224,11 @@ class ProviderReleaseTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], 2)
         self.assertEqual(manifest["vane"]["repository"], "AstroVela/vane")
         self.assertEqual(
-            manifest["vane"]["revision"], "4e12994a2fed5b872a7bdb44df72c1b9c5653cdc"
+            manifest["vane"]["revision"], "d1460a580455f01485e2e508e05d0049cb18a105"
         )
         self.assertIn(
-            f'AstroVela/vane@{manifest["vane"]["revision"]}',
-            (REPOSITORY_ROOT / "README.md").read_text(),
+            manifest["vane"]["revision"],
+            (REPOSITORY_ROOT / "VANE_README.md").read_text(),
         )
         self.assertEqual(
             manifest["vcpkg"]["revision"], "74e6536215718009aae747d86d84b78376bf9e09"

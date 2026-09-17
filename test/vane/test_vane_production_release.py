@@ -63,13 +63,13 @@ def test_production_manifest_preserves_every_other_source_contract(future_revisi
         # A later release changes only this source pin, not the trust-key floor.
         prod["vane"]["revision"] = future_revision
     assert dev["schema_version"] == prod["schema_version"] == 2
-    assert dev["vane"]["revision"] == "4e12994a2fed5b872a7bdb44df72c1b9c5653cdc"
+    assert dev["vane"]["revision"] == "d1460a580455f01485e2e508e05d0049cb18a105"
     assert re.fullmatch(r"[0-9a-f]{40}", prod["vane"]["revision"])
     prod["vane"]["revision"] = dev["vane"]["revision"]
     assert prod == dev
     assert builder.EXPECTED_RUST_RELEASE == "1.97.1"
     assert (
-        builder.EXPECTED_VORTEX_REVISION == "8eedee91dcf630551ab6b5d8705fad3d853a7c33"
+        builder.EXPECTED_VORTEX_REVISION == "3da8a2848b5d10d028e69471c5c97bd3dc785a03"
     )
     assert builder.SIGNING_PROFILES["production"] == ("astrovela/vane", None)
 
