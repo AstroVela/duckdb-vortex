@@ -91,11 +91,12 @@ source revision, distributed headers, or required build inputs are absent.
 
 The Vane lane selects `vortex-extension-vane/Cargo.toml`; the ordinary lane
 continues to select `vortex-extension/Cargo.toml`. Both manifests pin
-`AstroVela/vortex@8eedee91dcf630551ab6b5d8705fad3d853a7c33`, which adds the
-common DuckDB-filesystem-backed Vortex writer. The Vane integration manifest
+`AstroVela/vortex@3da8a2848b5d10d028e69471c5c97bd3dc785a03`, which includes the
+common DuckDB-filesystem-backed Vortex writer and adapts the distributed
+bind-data enum to the current Vane SDK. The Vane integration manifest
 also pins
-`AstroVela/vane@4e12994a2fed5b872a7bdb44df72c1b9c5653cdc`
-(`vane-ai==0.2.0.dev660`). CMake explicitly
+`AstroVela/vane@d1460a580455f01485e2e508e05d0049cb18a105`
+(`vane-ai==0.2.0.dev663`). CMake explicitly
 sets `VORTEX_VANE_DISTRIBUTED=1` only for this lane; both Rust adapters
 translate it to `#[cfg(vortex_vane_distributed)]`, while C++ uses the matching
 `VORTEX_VANE_DISTRIBUTED` definition. The filesystem writer is intentionally
@@ -111,7 +112,7 @@ Rust artifact, so the same entry point works with staticlib and cdylib builds.
 ### Independent Vane provider
 
 `VaneExtension.yml` builds and qualifies the separate
-`vane-extension-vortex` wheel, with exact `vane-ai==0.2.0.dev660` dependencies
+`vane-extension-vortex` wheel, with exact `vane-ai==0.2.0.dev663` dependencies
 for CPython 3.10–3.14 on manylinux_2_28_x86_64. This profile statically embeds
 Rust and DuckDB inside the dynamic artifact but does not link Vortex into the
 base Vane wheel; only `vortex_duckdb_cpp_init` is publicly exported.
@@ -121,7 +122,7 @@ qualification, fixed source identities, first-publisher configuration and the
 protected manual TestPyPI workflow. A separate production manifest prepares
 TestPyPI staging and same-byte PyPI promotion after an actual production-key-aware
 Vane runtime is released. Signing, packaging and publishing use isolated jobs;
-the dev660 contract stays unchanged. Adding the workflow does not itself publish
+the dev663 contract stays unchanged. Adding the workflow does not itself publish
 a package; the existing native/static qualification remains independent.
 
 ### Vane distributed Vortex scans and COPY
