@@ -198,7 +198,8 @@ credentials, immutable attempts, retry behavior, and uncertain commit outcomes.
 ## Build from source
 
 Ordinary Make targets build for DuckDB. Vane targets use the exact identities
-in [vane-extension.toml](vane-extension.toml) and the separate Vane Rust manifest:
+in [vane-extension.toml](vane-extension.toml) and the separate Vane Rust manifest.
+The development Vane pin is `d1460a580455f01485e2e508e05d0049cb18a105`:
 
 ```bash
 git clone --branch v1.5-variegata_vane --recurse-submodules \
@@ -219,16 +220,31 @@ S3-compatible storage testing.
 ## Tested examples
 
 All seven Python blocks above were executed sequentially on 2026-09-17 with
-Python 3.12, non-editable provider wheels, and `vane-ai==0.2.0.dev660` from
-Vane revision `4e12994a2fed5b872a7bdb44df72c1b9c5653cdc`. The Vortex native
-sources matched this branch at `21822ec`.
+Python 3.12, non-editable provider wheels, and `vane-ai==0.2.0.dev663` from
+Vane revision `d1460a580455f01485e2e508e05d0049cb18a105`. The extension was rebuilt from this branch with Vortex adapter
+`3da8a2848b5d10d028e69471c5c97bd3dc785a03`, which adapts the distributed
+bind-data enum to the current SDK. The engine source ID was `d8a9d61d59`.
 
 The test left `VANE_RUNNER` unset, asserted the default Ray runner, and used
 an owned cluster with two CPU execution nodes on one physical host. All blocks
-passed in 30.19 seconds, with two Ray writes and nine Ray reads including
+passed in 30.22 seconds, with two Ray writes and nine Ray reads including
 additional assertions. Checks compared all 1,000 original rows, all 100 derived
 rows, and both resolved file lists against the writers' committed results.
 
 This validates the local provider walkthrough, not S3-compatible storage,
 multi-host deployment, or the source-build recipe. Installation used matching
 local wheels; replace the TestPyPI placeholders with published versions.
+
+## Re-run the walkthrough test
+
+With matching provider and Vane wheels installed, run the checked-in test from
+this extension's checkout. Leave `VANE_RUNNER` and `RAY_ADDRESS` unset:
+
+```bash
+python -m pip install pytest
+python -I -m pytest -q -s test/vane/test_vane_readme.py
+```
+
+The test executes the Python blocks from this guide in a fresh temporary
+directory, asserts the default Ray runner, checks the resulting data, and owns
+and cleans up a same-host Ray cluster with two CPU execution nodes.
