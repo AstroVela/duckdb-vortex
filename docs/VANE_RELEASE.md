@@ -10,10 +10,10 @@ git submodule update --init --recursive
 
 ## Fixed development candidate
 
-- Vane: `472df75ab51fd3eac2642f6646545075549e5921`
-  (`vane-ai==0.2.0.dev612`).
-- Full DuckDB source tree ID: `edb8047859d9d5c443f46e86e6b5e507b5026944`;
-  native runtime SourceID: `edb8047859`.
+- Vane: `4e12994a2fed5b872a7bdb44df72c1b9c5653cdc`
+  (`vane-ai==0.2.0.dev660`).
+- Full DuckDB source tree ID: `f3f78689a6bae92ff43c46d16c881cb363f0cfc6`;
+  native runtime SourceID: `f3f78689a6`.
 - Vortex Rust fork: `8eedee91dcf630551ab6b5d8705fad3d853a7c33`.
 - Rust: `1.97.1`, with the committed Vane adapter Cargo.lock.
 - Extension vcpkg: `74e6536215718009aae747d86d84b78376bf9e09`.
@@ -23,16 +23,22 @@ git submodule update --init --recursive
 
 The runtime requirement is exact. The provider uses Vane's descriptor-derived
 package version, not the repository's native extension version or a new Vane
-release. No tag or republishing of vane-ai is needed for this candidate.
+release. Local and PR qualification builds the exact runtime from source.
+The development version is computed from GitHub's current `v0.1.0` tag
+(`fcbf27a8024359c9c2be943d4d95f5bd1d6719d9`). A stale local tag at
+`89d5427b885eefdcdce9394705110e2eccd5bb2a` produces a different commit
+distance; use a clean source checkout instead of overriding the version. Index
+publication requires that exact Vane runtime to be available on the selected
+index first; changing the source pin does not publish it.
 
 The separate `vane-extension-release.toml` currently pins Vane
-`033b549afcb498633fd6669b26c054c00363004e`, which introduces the production
-native trust root. **This is preparation, not a released runtime.** The
+`4e12994a2fed5b872a7bdb44df72c1b9c5653cdc`, which includes the production
+native trust root introduced by `033b549afcb498633fd6669b26c054c00363004e`. **This is preparation, not a released runtime.** The
 `release` operation intentionally fails its read-only preflight with this
 development source version, before a native build or signing approval.
 Before the first production candidate, replace only the release manifest's Vane
 pin through a reviewed PR with an exact, actually published PyPI runtime commit
-that includes the production-key commit. The dev612 manifest is unchanged.
+that includes the production-key commit. The dev660 manifest is unchanged.
 
 The preflight requires a protected manual dispatch from this repository's
 `v1.5-variegata_vane` branch, derives the canonical runtime version from full
@@ -44,7 +50,7 @@ but not a development, local, epoch or noncanonical version.
 ## Build and qualification
 
 `.github/workflows/VaneIntegration.yml` retains ordinary DuckDB isolation and
-Vane native/static-wheel, local, two-node Ray, and ASAN/LSAN lifecycle coverage.
+Vane native/static-wheel, default Ray smoke, two-node Ray, and ASAN/LSAN lifecycle coverage.
 Ordinary DuckDB inputs and the native Rust adapter stay unchanged.
 
 `.github/workflows/VaneExtension.yml` adds independent dynamic-provider CI.
@@ -65,7 +71,7 @@ runtime dependencies, artifact/SourceID/platform/trust verification and wheel
 qualification. There is no extension download at query time, compatibility
 selection, unsigned runtime switch or fallback path.
 
-Local SQL tests load the installed provider by name with automatic installation
+Default Ray SQL tests load the installed provider by name with automatic installation
 and loading disabled, then exercise scans, filters, aggregates and COPY. The Ray
 test owns a head with no execution CPUs and two one-CPU worker nodes, checks the
 prepared dynamic manifest, proves Vortex fragment execution on both persistent
@@ -73,7 +79,7 @@ workers, and verifies distributed COPY and empty COPY readback. Both CI and
 post-upload tests use installed wheels and isolated Python processes.
 The dynamic tests receive the exact runtime version, fork version and full
 DuckDB source tree ID from the selected source, so production does not reuse
-hard-coded dev612 expectations or skip native identity checks.
+hard-coded dev660 expectations or skip native identity checks.
 
 ## Signing and publication boundaries
 
@@ -86,7 +92,7 @@ read-only preflight
   -> package + native verification (no secrets or OIDC)
   -> complete matrix validation + checksums/SBOM/provenance
   -> minimal TestPyPI upload -> read-only index verification
-  -> installed local AND two-worker Ray qualification
+  -> installed default Ray smoke AND two-worker Ray qualification
   -> release only: protected read-only promotion verification
   -> minimal PyPI upload -> read-only PyPI verification
 ```
@@ -122,7 +128,7 @@ The code PR does **not** configure credentials or publish a package.
    `v1.5-variegata_vane`, and require an authorized human reviewer.
 2. Configure the environment secret
    `VANE_TESTPYPI_EXTENSION_SIGNING_PRIVATE_KEY` with the existing private key
-   for trust identity `astrovela/vane-testpypi`, matching dev612. Do not commit,
+   for trust identity `astrovela/vane-testpypi`, matching dev660. Do not commit,
    print or rotate this key as part of provider publication.
 3. In TestPyPI, configure the Trusted Publisher:
    project `vane-extension-vortex`, owner `AstroVela`,
@@ -135,14 +141,14 @@ The code PR does **not** configure credentials or publish a package.
      --ref v1.5-variegata_vane -f operation=testpypi-dev
    ```
 
-The workflow checks all five exact indexed dev612 runtime wheels, builds and
+The workflow checks all five exact indexed dev660 runtime wheels, builds and
 signs one native artifact in separate jobs, qualifies the complete provider matrix, revalidates
 the immutable release set, and produces checksums, SBOM, provenance and Sigstore
 evidence. OIDC upload stays in the repository's top-level workflow.
 
 The shared validator checks existing filenames and bytes before
 `skip-existing` can be used. After upload it compares all indexed SHA256 hashes.
-Local and two-worker Ray jobs download the exact selected versions, compare the
+Default Ray smoke and two-worker Ray jobs download the exact selected versions, compare the
 downloaded provider to the assembled artifact, run `pip check`, and execute the
 provider tests. A successful upload alone is not a successful qualification.
 
@@ -175,9 +181,9 @@ code change. No private key, tag, package or ruleset is created by this PR.
    ```
 
 The production artifact is newly built and signed with the production native key,
-then staged on TestPyPI. It is never a renamed or re-signed dev612 wheel. The
+then staged on TestPyPI. It is never a renamed or re-signed dev660 wheel. The
 staging tests install `vane-ai` from PyPI and the provider from TestPyPI, compare
-the provider bytes with the original candidate, and exercise both local and Ray
+the provider bytes with the original candidate, and exercise both default Ray smoke and two-worker
 execution. Only after both pass does the protected promotion verifier recheck the
 complete TestPyPI matrix and reject any conflicting, extra or yanked PyPI files.
 An absent version or byte-identical partial upload is allowed for a retry.
@@ -203,4 +209,27 @@ python -I -m pytest -q test/vane/test_vane_dynamic_signing.py test/vane/test_van
 ```
 
 No editable install or full local Vane test suite is needed. Native builds and
-installed local/two-worker integration run in the PR workflows.
+installed default Ray smoke/two-worker integration run in the PR workflows.
+
+## Default Ray qualification
+
+Both manifests pin merged Vane main `4e12994a2fed5b872a7bdb44df72c1b9c5653cdc`,
+including the schema-only chunk fix tracked in [Vane #827](https://github.com/AstroVela/vane/issues/827).
+That fix removes the zero-byte allocation assertion exposed by the native
+ASAN lifecycle lane and preserves empty nested results during profiling and
+debug verification.
+All public integration entry points require `VANE_RUNNER` to be absent and
+verify the default Ray runner without calling a runner-selection API. Fixture
+writes also use Ray. COPY checks inspect committed file receipts, and fixture
+files are copied from those selected outputs into a flat directory for stable
+glob and `file_index` expectations. Expected rows are generated independently
+in Python and compared against both SQL and Relation execution.
+
+The native and Ray object-store jobs use the same MinIO entry point. It pulls
+an upstream Quay release pinned by tag and digest, waits for successful health
+responses with a finite timeout, and creates the bucket through signed S3
+requests before exporting the test environment.
+
+The dynamic script's `--smoke` option selects a smaller read/write test set;
+it still uses the default Ray runner. The full linked suite retains worker,
+actor-loss, retry, and object-store failure coverage.

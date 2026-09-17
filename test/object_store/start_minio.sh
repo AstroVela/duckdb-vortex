@@ -3,8 +3,8 @@ set -euo pipefail
 
 : "${GITHUB_ENV:?GITHUB_ENV must name the GitHub Actions environment file}"
 
-# linux/amd64 manifest for RELEASE.2025-04-22T22-12-26Z.
-minio_image='minio/minio@sha256:3f97c5651cb6662b880c787a232b6b34fec8d8922e08d6617b25d241a21164bb'
+# Pin the upstream Quay release and its immutable multi-platform image index.
+minio_image='quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e'
 minio_access_key="vortex$(openssl rand -hex 8)"
 minio_secret_key="$(openssl rand -hex 24)"
 minio_endpoint='http://127.0.0.1:9000'

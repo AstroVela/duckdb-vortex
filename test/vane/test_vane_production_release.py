@@ -63,7 +63,7 @@ def test_production_manifest_preserves_every_other_source_contract(future_revisi
         # A later release changes only this source pin, not the trust-key floor.
         prod["vane"]["revision"] = future_revision
     assert dev["schema_version"] == prod["schema_version"] == 2
-    assert dev["vane"]["revision"] == "472df75ab51fd3eac2642f6646545075549e5921"
+    assert dev["vane"]["revision"] == "4e12994a2fed5b872a7bdb44df72c1b9c5653cdc"
     assert re.fullmatch(r"[0-9a-f]{40}", prod["vane"]["revision"])
     prod["vane"]["revision"] = dev["vane"]["revision"]
     assert prod == dev
@@ -533,7 +533,7 @@ def test_release_promotion_requires_both_smokes_and_read_only_revalidation():
     verify = JOBS["verify-pypi-promotion"]
     assert set(verify["needs"]) == {
         "assemble-testpypi-vortex",
-        "testpypi-local-vortex-integration",
+        "testpypi-smoke-vortex-integration",
         "testpypi-ray-vortex-integration",
     }
     assert verify["permissions"] == {"contents": "read"}
@@ -569,7 +569,7 @@ def test_all_release_consumers_download_original_immutable_ids():
             for name in (
                 "publish-testpypi-vortex",
                 "verify-testpypi-vortex",
-                "testpypi-local-vortex-integration",
+                "testpypi-smoke-vortex-integration",
                 "testpypi-ray-vortex-integration",
                 "verify-pypi-promotion",
                 "publish-pypi-vortex",
@@ -595,9 +595,9 @@ def test_all_release_consumers_download_original_immutable_ids():
         )
 
 
-@pytest.mark.parametrize("runner", ["local", "ray"])
-def test_staged_smokes_check_bytes_and_source_derived_runtime_identities(runner):
-    job = JOBS[f"testpypi-{runner}-vortex-integration"]
+@pytest.mark.parametrize("suite", ["smoke", "ray"])
+def test_staged_smokes_check_bytes_and_source_derived_runtime_identities(suite):
+    job = JOBS[f"testpypi-{suite}-vortex-integration"]
     assert job["permissions"] == {"contents": "read"}
     assert "environment" not in job
     environment = job["env"]

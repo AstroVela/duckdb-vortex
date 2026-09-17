@@ -9,10 +9,10 @@ permissions:
   contents: read
 
 env:
-  VANE_EXPECTED_REVISION: 472df75ab51fd3eac2642f6646545075549e5921
-  VANE_EXPECTED_PACKAGE_VERSION: 0.2.0.dev612
-  VANE_EXPECTED_FORK_VERSION: v1.5.5-vane.4bd8e72338
-  VANE_EXPECTED_DUCKDB_SOURCE_ID: edb8047859d9d5c443f46e86e6b5e507b5026944
+  VANE_EXPECTED_REVISION: 4e12994a2fed5b872a7bdb44df72c1b9c5653cdc
+  VANE_EXPECTED_PACKAGE_VERSION: 0.2.0.dev660
+  VANE_EXPECTED_FORK_VERSION: v1.5.5-vane.4e12994a2f
+  VANE_EXPECTED_DUCKDB_SOURCE_ID: f3f78689a6bae92ff43c46d16c881cb363f0cfc6
   VORTEX_EXPECTED_REVISION: 8eedee91dcf630551ab6b5d8705fad3d853a7c33
   VORTEX_EXPECTED_VERSION: 0.1.0
 
@@ -159,8 +159,8 @@ jobs:
           printf 'GitHub Actions ccache restore hit: %s\n' "${VANE_CCACHE_ACTION_HIT:-false}"
           ccache --show-stats
 
-  vane-wheel-vortex-local:
-    name: Installed Vane wheel local-fast Vortex qualification
+  vane-wheel-vortex-smoke:
+    name: Installed Vane wheel default Ray Vortex smoke
     needs:
       - vane-extension
       - vane-scan-lifecycle
@@ -171,7 +171,6 @@ jobs:
     outputs:
       wheel_sha256: ${{ steps.installed_wheel.outputs.wheel_sha256 }}
     env:
-      VANE_RUNNER: local-fast
       VANE_FORBIDDEN_SOURCE_ROOT: ${{ github.workspace }}
 
     steps:
@@ -198,8 +197,8 @@ jobs:
         shell: bash
         env:
           VANE_WHEEL_DIR: ${{ runner.temp }}/vane-vortex-wheel
-          VANE_TEST_ROOT: ${{ runner.temp }}/vane-vortex-local-test
-          VANE_VENV: ${{ runner.temp }}/vane-vortex-local-venv
+          VANE_TEST_ROOT: ${{ runner.temp }}/vane-vortex-smoke-test
+          VANE_VENV: ${{ runner.temp }}/vane-vortex-smoke-venv
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -251,6 +250,9 @@ jobs:
           mkdir "$VANE_TEST_ROOT"
           install -m 0644 test/vane/vortex_wheel_test_support.py "$VANE_TEST_ROOT/"
           install -m 0644 test/vane/test_vane_wheel_vortex.py "$VANE_TEST_ROOT/"
+          install -m 0644 test/vane/test_vane_wheel_ray_vortex.py "$VANE_TEST_ROOT/"
+          install -m 0644 test/object_store/vortex_s3_fault_proxy.py "$VANE_TEST_ROOT/"
+          install -m 0644 test/object_store/vortex_s3_test_support.py "$VANE_TEST_ROOT/"
 
           cd "$VANE_TEST_ROOT"
           VANE_WHEEL_SHA256="$wheel_sha256" \
@@ -261,15 +263,14 @@ jobs:
     name: Installed Vane wheel two-node Ray Vortex qualification
     needs:
       - vane-extension
-      - vane-wheel-vortex-local
+      - vane-wheel-vortex-smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
       contents: read
     env:
-      VANE_RUNNER: ray
       VANE_FORBIDDEN_SOURCE_ROOT: ${{ github.workspace }}
-      VANE_LOCAL_WHEEL_SHA256: ${{ needs.vane-wheel-vortex-local.outputs.wheel_sha256 }}
+      VANE_SMOKE_WHEEL_SHA256: ${{ needs.vane-wheel-vortex-smoke.outputs.wheel_sha256 }}
       RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: "0"
       RAY_DEDUP_LOGS: "0"
       VANE_UDF_TARGET_MAX_BATCH_BYTES: "4096"
@@ -309,7 +310,7 @@ jobs:
           test "${#wheels[@]}" -eq 1
           wheel_sha256="$(sha256sum "${wheels[0]}" | awk '{print $1}')"
           printf 'Vane Vortex wheel SHA256: %s\n' "$wheel_sha256"
-          test "$wheel_sha256" = "$VANE_LOCAL_WHEEL_SHA256"
+          test "$wheel_sha256" = "$VANE_SMOKE_WHEEL_SHA256"
 
           python -m venv "$VANE_VENV"
           "$VANE_VENV/bin/python" -m pip install --disable-pip-version-check --no-cache-dir "${wheels[0]}"

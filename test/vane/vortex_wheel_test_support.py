@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -106,11 +107,10 @@ def verify_duckdb_identity(
     return str(library_version), str(source_id)
 
 
-def verify_installed_runtime(
-    vane: object, connection: object, expected_runner: str
-) -> dict[str, str]:
+def verify_installed_runtime(vane: object, connection: object) -> dict[str, str]:
+    require_true("VANE_RUNNER" not in os.environ, "leave VANE_RUNNER unset")
     require_equal(
-        os.environ.get("VANE_RUNNER"), expected_runner, "configured Vane runner"
+        vane.runners.get_or_create_runner().name, "ray", "default Vane runner"
     )
 
     expected_revision = os.environ.get("VANE_EXPECTED_REVISION", "")
@@ -229,7 +229,7 @@ def verify_installed_runtime(
         "library_version": str(library_version),
         "module_path": str(module_path),
         "package_version": str(vane.__version__),
-        "runner": expected_runner,
+        "runner": "ray",
         "source_id": str(source_id),
         "vane_revision": expected_revision,
         "vortex_revision": expected_vortex_revision,
@@ -240,57 +240,95 @@ def verify_installed_runtime(
     return identity
 
 
+def fixture_rows() -> list[tuple[object, ...]]:
+    return [
+        (i, i % 8, f"row-{i}", None if i % 11 == 0 else i * 3)
+        for i in range(TOTAL_ROWS)
+    ]
+
+
 def create_vortex_fixture(connection: object, root: Path) -> tuple[list[Path], Path]:
+    import vane
+
     root.mkdir(parents=True, exist_ok=False)
-    files: list[Path] = []
-    for file_index in range(FILE_COUNT):
-        start = file_index * ROWS_PER_FILE
-        stop = start + ROWS_PER_FILE
-        path = root / f"part-{file_index:02d}.vortex"
-        connection.execute(f"""
-            COPY (
-                SELECT
-                    i::BIGINT AS id,
-                    (i % 8)::INTEGER AS part,
-                    ('row-' || i::VARCHAR)::VARCHAR AS payload,
-                    CASE WHEN i % 11 = 0 THEN NULL ELSE (i * 3)::INTEGER END AS nullable_value
-                FROM range({start}, {stop}) source(i)
-            ) TO {sql_string(path)} (FORMAT VORTEX)
-            """)
+    runner = vane.runners.get_or_create_runner()
+    require_equal(runner.name, "ray", "fixture default runner")
+    original_write = runner.run_write
+    receipts = []
+
+    def record(logical_plan: object) -> object:
         require_true(
-            path.is_file() and path.stat().st_size > 0,
-            f"fixture file was not written: {path}",
+            isinstance(logical_plan, vane.ray_cxx.PyLogicalPlan),
+            "bound fixture write plan",
         )
-        files.append(path)
+        result = original_write(logical_plan)
+        receipts.append(result)
+        return result
 
-    empty_path = root / "empty.vortex"
-    connection.execute(f"""
-        COPY (
-            SELECT
-                i::BIGINT AS id,
-                (i % 8)::INTEGER AS part,
-                ('row-' || i::VARCHAR)::VARCHAR AS payload,
-                (i * 3)::INTEGER AS nullable_value
-            FROM range(0) source(i)
-        ) TO {sql_string(empty_path)} (FORMAT VORTEX)
-        """)
-    require_true(
-        empty_path.is_file() and empty_path.stat().st_size > 0,
-        "the zero-row Vortex fixture was not written",
-    )
-
-    files_sql = vortex_file_list(files)
-    summary = connection.execute(
-        "SELECT count(*)::BIGINT, count(DISTINCT id)::BIGINT, sum(id)::BIGINT, "
-        "min(id)::BIGINT, max(id)::BIGINT, "
-        "count(*) FILTER (WHERE payload IS DISTINCT FROM 'row-' || id::VARCHAR)::BIGINT, "
-        "count(*) FILTER (WHERE nullable_value IS NULL)::BIGINT "
-        f"FROM read_vortex({files_sql})"
-    ).fetchall()
+    runner.run_write = record
+    files = []
+    try:
+        for index in range(FILE_COUNT + 1):
+            empty = index == FILE_COUNT
+            start = index * ROWS_PER_FILE if not empty else 0
+            stop = start + ROWS_PER_FILE if not empty else 0
+            output = root / f"write-{index}"
+            output.mkdir()
+            connection.sql(
+                "SELECT i::BIGINT AS id, (i % 8)::INTEGER AS part, "
+                "('row-' || i::VARCHAR)::VARCHAR AS payload, "
+                "CASE WHEN i % 11 = 0 THEN NULL ELSE (i * 3)::INTEGER END AS nullable_value "
+                f"FROM range({start}, {stop}) source(i)"
+            ).repartition(num_partitions=1).write_file(str(output), format="vortex")
+            require_equal(
+                len(receipts), index + 1, "one Ray dispatch per fixture write"
+            )
+            receipt = receipts[-1]
+            require_equal(
+                receipt.get("copy_output_committed"), True, "committed fixture write"
+            )
+            require_equal(
+                receipt.get("rows_copied"), stop - start, "fixture write count"
+            )
+            selected = receipt["files"]
+            require_equal(len(selected), 1, "single-partition fixture file count")
+            # Keep the committed output intact, and copy its selected bytes into
+            # a flat fixture directory for stable path-list/glob/file_index tests.
+            target = root / ("empty.vortex" if empty else f"part-{index:02d}.vortex")
+            shutil.copyfile(selected[0]["final_path"], target)
+            require_true(target.stat().st_size > 0, "nonempty Vortex container")
+            if not empty:
+                files.append(target)
+    finally:
+        runner.run_write = original_write
     require_equal(
-        summary, [(128, 128, 8128, 0, 127, 0, 12)], "native Vortex fixture content"
+        connection.execute(
+            "SELECT id, part, payload, nullable_value "
+            f"FROM read_vortex({vortex_file_list(files)}) ORDER BY id"
+        ).fetchall(),
+        fixture_rows(),
+        "fixture content from default Ray writes",
     )
-    return files, empty_path
+    return files, root / "empty.vortex"
+
+
+def expected_scan_rows(description: str) -> list[tuple[object, ...]]:
+    rows = fixture_rows()
+    return {
+        "single-path content": rows[:ROWS_PER_FILE],
+        "path-list content": rows,
+        "glob content": rows,
+        "vortex_scan alias": [(i, i // ROWS_PER_FILE) for i in range(29, 69)],
+        "projection and filter pushdown": [
+            (i, f"row-{i}") for i in range(17, 112) if i % 8 in (2, 5)
+        ],
+        "aggregate pushdown": [(84, 19, 102, 5082)],
+        "virtual-column aggregate": [(0, 3, 128)],
+        "file_index pruning": [(1, 32, 32, 63), (3, 32, 96, 127)],
+        "zero-match file pruning": [(0, None)],
+        "explicit empty split": [],
+        "empty Vortex input": [(0,)],
+    }[description]
 
 
 def scan_cases(files: list[Path], empty_path: Path) -> list[tuple[str, str]]:
@@ -428,16 +466,10 @@ def assert_exact_dataset(
 ) -> None:
     files_sql = vortex_file_list(files)
     rows = connection.execute(
-        "SELECT count(*)::BIGINT, count(DISTINCT id)::BIGINT, sum(id)::BIGINT, "
-        "min(id)::BIGINT, max(id)::BIGINT, "
-        "count(*) FILTER (WHERE part IS DISTINCT FROM (id % 8)::INTEGER)::BIGINT, "
-        "count(*) FILTER (WHERE payload IS DISTINCT FROM 'row-' || id::VARCHAR)::BIGINT, "
-        "count(*) FILTER (WHERE "
-        "(id % 11 = 0 AND nullable_value IS NOT NULL) OR "
-        "(id % 11 <> 0 AND nullable_value IS DISTINCT FROM (id * 3)::INTEGER))::BIGINT "
-        f"FROM read_vortex({files_sql})"
+        "SELECT id, part, payload, nullable_value "
+        f"FROM read_vortex({files_sql}) ORDER BY id"
     ).fetchall()
-    require_equal(rows, [(TOTAL_ROWS, TOTAL_ROWS, 8128, 0, 127, 0, 0, 0)], description)
+    require_equal(rows, fixture_rows(), description)
     schema = connection.execute(
         "DESCRIBE SELECT id, part, payload, nullable_value "
         f"FROM read_vortex({files_sql})"
