@@ -25,9 +25,9 @@ permissions:
   contents: read
 
 env:
-  VANE_EXPECTED_PACKAGE_VERSION: 0.2.0.dev660
-  VANE_EXPECTED_FORK_VERSION: v1.5.5-vane.4e12994a2f
-  VANE_EXPECTED_DUCKDB_SOURCE_ID: f3f78689a6bae92ff43c46d16c881cb363f0cfc6
+  VANE_EXPECTED_PACKAGE_VERSION: 0.2.0.dev662
+  VANE_EXPECTED_FORK_VERSION: v1.5.5-vane.d1460a5804
+  VANE_EXPECTED_DUCKDB_SOURCE_ID: d8a9d61d598c103bdedc321def50ad3e55c71a26
 
 jobs:
   vane-provider-release-tooling:
@@ -128,7 +128,7 @@ jobs:
       - name: Validate exact Vane and CI-tools identities
         shell: bash
         env:
-          VANE_CI_TOOLS_VERSION: 618aec05ad68c8c130c69505b1fd99311fc9f47d
+          VANE_CI_TOOLS_VERSION: d7316f29add0cc893c5fd126a971ffb78cc39c78
         run: |
           set -euo pipefail
           actual_ci_tools="$(git -C extension/vane-extension-ci-tools rev-parse HEAD)"
@@ -650,7 +650,7 @@ jobs:
       - name: Validate exact Vane and CI-tools identities
         shell: bash
         env:
-          VANE_CI_TOOLS_VERSION: 618aec05ad68c8c130c69505b1fd99311fc9f47d
+          VANE_CI_TOOLS_VERSION: d7316f29add0cc893c5fd126a971ffb78cc39c78
         run: |
           set -euo pipefail
           actual_ci_tools="$(git -C extension/vane-extension-ci-tools rev-parse HEAD)"

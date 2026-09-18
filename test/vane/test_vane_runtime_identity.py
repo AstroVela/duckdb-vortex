@@ -37,7 +37,7 @@ class RuntimeIdentityTest(unittest.TestCase):
         self.vane = SimpleNamespace(
             __file__=str(Path(sys.prefix) / "lib/vane/__init__.py"),
             __git_revision__=RUNTIME_SOURCE_ID,
-            __version__="0.2.0.dev660",
+            __version__="0.2.0.dev662",
             runners=SimpleNamespace(
                 get_or_create_runner=lambda: SimpleNamespace(name="ray")
             ),
@@ -97,11 +97,11 @@ class RuntimeIdentityTest(unittest.TestCase):
 
     def test_static_harness_accepts_the_native_runtime_identity(self) -> None:
         environment = {
-            "VANE_EXPECTED_REVISION": "4e12994a2fed5b872a7bdb44df72c1b9c5653cdc",
+            "VANE_EXPECTED_REVISION": "d1460a580455f01485e2e508e05d0049cb18a105",
             "VANE_EXPECTED_PACKAGE_VERSION": self.vane.__version__,
             "VANE_EXPECTED_FORK_VERSION": FORK_VERSION,
             "VANE_EXPECTED_DUCKDB_SOURCE_ID": SOURCE_TREE_ID,
-            "VORTEX_EXPECTED_REVISION": "8eedee91dcf630551ab6b5d8705fad3d853a7c33",
+            "VORTEX_EXPECTED_REVISION": "3da8a2848b5d10d028e69471c5c97bd3dc785a03",
             "VORTEX_EXPECTED_VERSION": "0.1.0",
             "VANE_WHEEL_SHA256": "a" * 64,
         }

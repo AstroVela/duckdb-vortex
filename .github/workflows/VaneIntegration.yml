@@ -9,11 +9,11 @@ permissions:
   contents: read
 
 env:
-  VANE_EXPECTED_REVISION: 4e12994a2fed5b872a7bdb44df72c1b9c5653cdc
-  VANE_EXPECTED_PACKAGE_VERSION: 0.2.0.dev660
-  VANE_EXPECTED_FORK_VERSION: v1.5.5-vane.4e12994a2f
-  VANE_EXPECTED_DUCKDB_SOURCE_ID: f3f78689a6bae92ff43c46d16c881cb363f0cfc6
-  VORTEX_EXPECTED_REVISION: 8eedee91dcf630551ab6b5d8705fad3d853a7c33
+  VANE_EXPECTED_REVISION: d1460a580455f01485e2e508e05d0049cb18a105
+  VANE_EXPECTED_PACKAGE_VERSION: 0.2.0.dev662
+  VANE_EXPECTED_FORK_VERSION: v1.5.5-vane.d1460a5804
+  VANE_EXPECTED_DUCKDB_SOURCE_ID: d8a9d61d598c103bdedc321def50ad3e55c71a26
+  VORTEX_EXPECTED_REVISION: 3da8a2848b5d10d028e69471c5c97bd3dc785a03
   VORTEX_EXPECTED_VERSION: 0.1.0
 
 concurrency:
@@ -50,9 +50,9 @@ jobs:
   vane-extension:
     permissions:
       contents: read
-    uses: AstroVela/vane-extension-ci-tools/.github/workflows/_vane_extension_ci.yml@618aec05ad68c8c130c69505b1fd99311fc9f47d
+    uses: AstroVela/vane-extension-ci-tools/.github/workflows/_vane_extension_ci.yml@d7316f29add0cc893c5fd126a971ffb78cc39c78
     with:
-      ci_tools_version: 618aec05ad68c8c130c69505b1fd99311fc9f47d
+      ci_tools_version: d7316f29add0cc893c5fd126a971ffb78cc39c78
       manifest: vane-extension.toml
       build_jobs: 8
       run_native_tests: true
