@@ -220,7 +220,7 @@ S3-compatible storage testing.
 ## Tested examples
 
 All seven Python blocks above were executed sequentially on 2026-09-17 with
-Python 3.12, non-editable provider wheels, and `vane-ai==0.2.0.dev663` from
+Python 3.12, non-editable provider wheels, and `vane-ai==0.2.0.dev662` from
 Vane revision `d1460a580455f01485e2e508e05d0049cb18a105`. The extension was rebuilt from this branch with Vortex adapter
 `3da8a2848b5d10d028e69471c5c97bd3dc785a03`, which adapts the distributed
 bind-data enum to the current SDK. The engine source ID was `d8a9d61d59`.

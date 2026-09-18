@@ -11,7 +11,7 @@ git submodule update --init --recursive
 ## Fixed development candidate
 
 - Vane: `d1460a580455f01485e2e508e05d0049cb18a105`
-  (`vane-ai==0.2.0.dev663`).
+  (`vane-ai==0.2.0.dev662`).
 - Full DuckDB source tree ID: `d8a9d61d598c103bdedc321def50ad3e55c71a26`;
   native runtime SourceID: `d8a9d61d59`.
 - Vortex Rust fork: `3da8a2848b5d10d028e69471c5c97bd3dc785a03`.
@@ -38,7 +38,7 @@ native trust root introduced by `033b549afcb498633fd6669b26c054c00363004e`. **Th
 development source version, before a native build or signing approval.
 Before the first production candidate, replace only the release manifest's Vane
 pin through a reviewed PR with an exact, actually published PyPI runtime commit
-that includes the production-key commit. The dev663 manifest is unchanged.
+that includes the production-key commit. The dev662 manifest is unchanged.
 
 The preflight requires a protected manual dispatch from this repository's
 `v1.5-variegata_vane` branch, derives the canonical runtime version from full
@@ -79,7 +79,7 @@ workers, and verifies distributed COPY and empty COPY readback. Both CI and
 post-upload tests use installed wheels and isolated Python processes.
 The dynamic tests receive the exact runtime version, fork version and full
 DuckDB source tree ID from the selected source, so production does not reuse
-hard-coded dev663 expectations or skip native identity checks.
+hard-coded dev662 expectations or skip native identity checks.
 
 ## Signing and publication boundaries
 
@@ -128,7 +128,7 @@ The code PR does **not** configure credentials or publish a package.
    `v1.5-variegata_vane`, and require an authorized human reviewer.
 2. Configure the environment secret
    `VANE_TESTPYPI_EXTENSION_SIGNING_PRIVATE_KEY` with the existing private key
-   for trust identity `astrovela/vane-testpypi`, matching dev663. Do not commit,
+   for trust identity `astrovela/vane-testpypi`, matching dev662. Do not commit,
    print or rotate this key as part of provider publication.
 3. In TestPyPI, configure the Trusted Publisher:
    project `vane-extension-vortex`, owner `AstroVela`,
@@ -141,7 +141,7 @@ The code PR does **not** configure credentials or publish a package.
      --ref v1.5-variegata_vane -f operation=testpypi-dev
    ```
 
-The workflow checks all five exact indexed dev663 runtime wheels, builds and
+The workflow checks all five exact indexed dev662 runtime wheels, builds and
 signs one native artifact in separate jobs, qualifies the complete provider matrix, revalidates
 the immutable release set, and produces checksums, SBOM, provenance and Sigstore
 evidence. OIDC upload stays in the repository's top-level workflow.
@@ -181,7 +181,7 @@ code change. No private key, tag, package or ruleset is created by this PR.
    ```
 
 The production artifact is newly built and signed with the production native key,
-then staged on TestPyPI. It is never a renamed or re-signed dev663 wheel. The
+then staged on TestPyPI. It is never a renamed or re-signed dev662 wheel. The
 staging tests install `vane-ai` from PyPI and the provider from TestPyPI, compare
 the provider bytes with the original candidate, and exercise both default Ray smoke and two-worker
 execution. Only after both pass does the protected promotion verifier recheck the

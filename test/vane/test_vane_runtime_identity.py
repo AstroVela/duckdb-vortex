@@ -37,7 +37,7 @@ class RuntimeIdentityTest(unittest.TestCase):
         self.vane = SimpleNamespace(
             __file__=str(Path(sys.prefix) / "lib/vane/__init__.py"),
             __git_revision__=RUNTIME_SOURCE_ID,
-            __version__="0.2.0.dev663",
+            __version__="0.2.0.dev662",
             runners=SimpleNamespace(
                 get_or_create_runner=lambda: SimpleNamespace(name="ray")
             ),
