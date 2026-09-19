@@ -224,7 +224,7 @@ class ProviderReleaseTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], 2)
         self.assertEqual(manifest["vane"]["repository"], "AstroVela/vane")
         self.assertEqual(
-            manifest["vane"]["revision"], "d1460a580455f01485e2e508e05d0049cb18a105"
+            manifest["vane"]["revision"], "79049f382ba6ee79d035c09cc8b5d3538e5bbe6a"
         )
         self.assertIn(
             manifest["vane"]["revision"],
