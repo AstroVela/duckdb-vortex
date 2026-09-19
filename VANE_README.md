@@ -8,30 +8,22 @@ unset; no runner-selection call is needed.
 
 ## Install a provider package
 
-Install `vane-extension-vortex` with the exact `vane-ai` version required by
-its package metadata. Use the same matching wheels on the application, Ray
-coordinator, and workers. Provider versions include an artifact identity and
-differ from the base runtime version.
-
-For development wheels, replace the following placeholders with published
-matching versions for your interpreter and platform. Use a fresh wheel directory:
+Install `vane-extension-vortex` from PyPI with the exact `vane-ai` version
+required by its package metadata. Use the same matching wheels on the
+application, Ray coordinator, and workers. Provider versions include an
+artifact identity and differ from the base runtime version.
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-VORTEX_VERSION='<provider-version>'
-VANE_VERSION='<matching-vane-version>'
-python -m pip download --no-deps --only-binary=:all: \
-  --index-url https://test.pypi.org/simple/ --dest vortex-wheels \
-  "vane-extension-vortex==$VORTEX_VERSION" "vane-ai==$VANE_VERSION"
-python -m pip install --index-url https://pypi.org/simple/ \
-  ./vortex-wheels/*.whl grpcio
+python -m pip install vane-extension-vortex grpcio
 python -m pip check
 ```
 
-See [provider releases](docs/VANE_RELEASE.md) for package identities and
-release channels. Load the provider:
+Pin exact versions (for example `"vane-extension-vortex==<version>"`) for
+reproducible deployments. See [provider releases](docs/VANE_RELEASE.md) for
+package identities and release channels. Load the provider:
 
 ```python
 import vane
