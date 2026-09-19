@@ -25,9 +25,9 @@ permissions:
   contents: read
 
 env:
-  VANE_EXPECTED_PACKAGE_VERSION: 0.2.0.dev662
-  VANE_EXPECTED_FORK_VERSION: v1.5.5-vane.d1460a5804
-  VANE_EXPECTED_DUCKDB_SOURCE_ID: d8a9d61d598c103bdedc321def50ad3e55c71a26
+  VANE_EXPECTED_PACKAGE_VERSION: 0.2.0
+  VANE_EXPECTED_FORK_VERSION: v1.5.5-vane.5489cd8a64
+  VANE_EXPECTED_DUCKDB_SOURCE_ID: e24da547b83d10b75697b8a40acd684f0a0a8481
 
 jobs:
   vane-provider-release-tooling:
@@ -312,7 +312,8 @@ jobs:
           for wheel in dist.glob("vane_extension_vortex-*.whl"):
               shutil.copyfile(wheel, selected / wheel.name)
           PY
-          python -I extension/vane-extension-ci-tools/scripts/vane_provider_release.py validate --channel testpypi-dev \
+          # Validate stable-version dependencies; this read-only check does not publish.
+          python -I extension/vane-extension-ci-tools/scripts/vane_provider_release.py validate --channel release \
             --manifest "$VANE_MANIFEST" --extension-root "$VANE_EXTENSION_ROOT" \
             --vane-source "$VANE_SOURCE_DIR" \
             --ci-tools-version "$(git -C "$VANE_EXTENSION_ROOT" rev-parse HEAD:vane-extension-ci-tools)" \

@@ -10,6 +10,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -17,8 +18,11 @@ import tomllib
 import unittest
 import zipfile
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
+
+import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = REPOSITORY_ROOT / "vane-provider-release.toml"
@@ -101,6 +105,65 @@ class ProviderReleaseTest(unittest.TestCase):
             ],
             [("vortex", "vane-extension-vortex", ())],
         )
+
+    def test_ci_runtime_expectations_match_the_stable_baseline(self) -> None:
+        manifest = tomllib.loads((REPOSITORY_ROOT / "vane-extension.toml").read_text())
+        expected = {
+            "VANE_EXPECTED_PACKAGE_VERSION": "0.2.0",
+            "VANE_EXPECTED_FORK_VERSION": "v1.5.5-vane.5489cd8a64",
+            "VANE_EXPECTED_DUCKDB_SOURCE_ID": "e24da547b83d10b75697b8a40acd684f0a0a8481",
+        }
+        for filename in ("VaneExtension.yml", "VaneIntegration.yml"):
+            workflow = yaml.safe_load(
+                (REPOSITORY_ROOT / ".github/workflows" / filename).read_text()
+            )
+            with self.subTest(workflow=filename):
+                for name, value in expected.items():
+                    self.assertEqual(workflow["env"][name], value)
+                if filename == "VaneIntegration.yml":
+                    self.assertEqual(
+                        workflow["env"]["VANE_EXPECTED_REVISION"],
+                        manifest["vane"]["revision"],
+                    )
+
+    def test_ci_matrix_validation_accepts_stable_wheel_dependencies(self) -> None:
+        workflow = yaml.safe_load(
+            (REPOSITORY_ROOT / ".github/workflows/VaneExtension.yml").read_text()
+        )
+        step = next(
+            step
+            for step in workflow["jobs"]["vane-dynamic-wheel"]["steps"]
+            if step.get("name")
+            == "Validate the provider matrix and TestPyPI size budget in CI"
+        )
+        script = step["run"]
+        command = shlex.split(script[script.index("python -I extension/") :])
+        channel = command[command.index("--channel") + 1]
+        version = workflow["env"]["VANE_EXPECTED_PACKAGE_VERSION"]
+        config = replace(self.config, interpreters=("cp312",))
+        with tempfile.TemporaryDirectory(prefix="vane-vortex-ci-matrix-") as value:
+            directory = Path(value)
+            paths = write_wheels(
+                directory, "vortex", vane_requirement="vane-ai===0.2.0"
+            )
+            for path in paths:
+                if "-cp312-" not in path.name:
+                    path.unlink()
+            self.assertEqual(
+                self.validator.validate_release(
+                    directory, version, config, channel=channel
+                ),
+                VERSIONS,
+            )
+            # A stale dev dependency must still fail the same CI gate.
+            write_wheels(directory, "vortex", vane_requirement="vane-ai===0.2.0.dev662")
+            for path in directory.glob("*.whl"):
+                if "-cp312-" not in path.name:
+                    path.unlink()
+            with self.assertRaises(self.validator.ReleaseValidationError):
+                self.validator.validate_release(
+                    directory, version, config, channel=channel
+                )
 
     def test_complete_release_cli_outputs(self) -> None:
         # Generic matrix/index edge cases live in the shared tools repository.
@@ -224,7 +287,7 @@ class ProviderReleaseTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], 2)
         self.assertEqual(manifest["vane"]["repository"], "AstroVela/vane")
         self.assertEqual(
-            manifest["vane"]["revision"], "d1460a580455f01485e2e508e05d0049cb18a105"
+            manifest["vane"]["revision"], "79049f382ba6ee79d035c09cc8b5d3538e5bbe6a"
         )
         self.assertIn(
             manifest["vane"]["revision"],
