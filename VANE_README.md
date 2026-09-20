@@ -17,7 +17,7 @@ artifact identity and differ from the base runtime version.
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install vane-extension-vortex grpcio
+python -m pip install vane-extension-vortex
 python -m pip check
 ```
 
