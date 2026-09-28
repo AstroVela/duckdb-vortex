@@ -3,6 +3,10 @@
 #include "vortex_extension.hpp"
 #include "vortex_rust.hpp"
 
+#ifdef VORTEX_ENABLE_SPTAG_SPFRESH
+#include "spfresh_search.hpp"
+#endif
+
 #ifdef VORTEX_VANE_DISTRIBUTED
 #include "duckdb/main/extension/extension_loader.hpp"
 #endif
@@ -12,6 +16,9 @@ using namespace duckdb;
 #ifdef VORTEX_VANE_DISTRIBUTED
 static void LoadVane(ExtensionLoader &loader) {
 	vortex_init_vane_rust(&loader);
+#ifdef VORTEX_ENABLE_SPTAG_SPFRESH
+	RegisterSpfreshSearch(loader);
+#endif
 }
 #endif
 

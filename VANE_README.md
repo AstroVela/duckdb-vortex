@@ -6,6 +6,10 @@ Write and query Vortex files through Vane's SQL and Python Relation APIs.
 Supported scans and file writes use the default Ray runner. Leave `VANE_RUNNER`
 unset; no runner-selection call is needed.
 
+For the optional local SPFresh vector-search integration, see
+[SPFresh native batch search](docs/spfresh.md). Those search functions execute
+in-process and do not yet provide Ray distributed scan callbacks.
+
 ## Install a provider package
 
 Install `vane-extension-vortex` from PyPI with the exact `vane-ai` version

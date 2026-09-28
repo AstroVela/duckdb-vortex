@@ -19,6 +19,11 @@ endif()
 
 option(USE_SHARED_VORTEX OFF)
 option(VORTEX_VANE_DISTRIBUTED "Build Vane distributed Vortex support" OFF)
+option(VORTEX_ENABLE_SPTAG_SPFRESH "Enable local SPFresh batch search in Vane" OFF)
+set(VORTEX_SPTAG_HOME "$ENV{SPTAG_HOME}" CACHE PATH "Built SPFresh/SPFresh checkout")
+if(VORTEX_ENABLE_SPTAG_SPFRESH AND NOT VORTEX_VANE_DISTRIBUTED)
+    message(FATAL_ERROR "SPFresh currently requires the Vane extension build")
+endif()
 option(VORTEX_VANE_DYNAMIC_PROVIDER
        "Build a self-contained Vane dynamic-provider artifact" OFF)
 if(VORTEX_VANE_DYNAMIC_PROVIDER)
@@ -156,6 +161,10 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
     ${SECURITY_FRAMEWORK}
     ${CORE_FOUNDATION_FRAMEWORK}
 )
+
+if(VORTEX_ENABLE_SPTAG_SPFRESH)
+    include(cmake/spfresh.cmake)
+endif()
 
 if(VORTEX_VANE_DYNAMIC_PROVIDER)
     # The Rust archive itself calls DuckDB's C and C++ APIs. Resolve those
