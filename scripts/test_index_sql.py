@@ -302,6 +302,42 @@ def main():
         finally:
             reference.write_bytes(before)
 
+    constant_call = search(query, topk=1)
+    initial_bind_queries = [
+        f'SELECT "row".id, $1 AS parameter FROM {constant_call}',
+        f'SELECT "row".id FROM {constant_call} WHERE rank >= $1',
+        f'SELECT "row".id FROM {constant_call} LIMIT $1',
+        f'WITH hits AS (SELECT * FROM {constant_call}) SELECT "row".id, $1 FROM hits',
+        f'SELECT (SELECT "row".id FROM {constant_call}), $1',
+        f'SELECT a."row".id FROM {constant_call} a CROSS JOIN vortex_index_search({quote(reference)}, [$1::FLOAT, {",".join(str(value) + "::FLOAT" for value in query[1:])}], 1) b',
+    ]
+    for prepared_query in initial_bind_queries:
+        try:
+            run(
+                f"PREPARE nearest AS {prepared_query};\n"
+                f"COPY (SELECT content FROM read_text({quote(replacement_reference)})) TO {quote(reference)} (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');\n"
+                "EXECUTE nearest(1);",
+                "reference changed",
+            )
+            require(
+                json.loads(reference.read_bytes())
+                == json.loads(replacement_reference.read_bytes()),
+                "First-execution regression must use a valid replacement reference",
+            )
+            refreshed = work / "refreshed.csv"
+            run(
+                f'PREPARE refreshed AS COPY (SELECT "row".id AS id FROM {constant_call} LIMIT $1) TO {quote(refreshed)} (HEADER true); EXECUTE refreshed(1);'
+            )
+            with refreshed.open() as stream:
+                actual = list(csv.DictReader(stream))
+            require(
+                len(actual) == 1 and int(actual[0]["id"]) == 5000,
+                "A newly prepared statement did not accept the replacement generation",
+            )
+            refreshed.unlink()
+        finally:
+            reference.write_bytes(before)
+
     before = reference.read_bytes()
     run(
         f"PREPARE nearest AS SELECT * FROM {search(query)}; COPY (SELECT 'changed') TO {quote(reference)} (FORMAT csv); EXECUTE nearest;",
@@ -352,10 +388,12 @@ def main():
         "disabled_local_filesystem_rejected": True,
         "invalid_vector_types_rejected": True,
         "parameterized_reference_pinned": True,
+        "first_execution_reference_pinned": True,
         "negative_cases": len(negatives)
         + 6
         + len(invalid_vectors)
-        + len(parameterized_queries),
+        + len(parameterized_queries)
+        + len(initial_bind_queries),
         "reference": str(reference),
     }
     (work / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
