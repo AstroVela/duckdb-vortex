@@ -69,7 +69,7 @@ def test_production_manifest_preserves_every_other_source_contract(future_revisi
     assert prod == dev
     assert builder.EXPECTED_RUST_RELEASE == "1.97.1"
     assert (
-        builder.EXPECTED_VORTEX_REVISION == "069f750dc7b426106a47aa698f4b4c00ff3f6406"
+        builder.EXPECTED_VORTEX_REVISION == "ed7cda3ba99af791c379facaf6409dcaeb858873"
     )
     assert builder.SIGNING_PROFILES["production"] == ("astrovela/vane", None)
 
