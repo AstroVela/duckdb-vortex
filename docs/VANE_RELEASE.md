@@ -14,7 +14,7 @@ git submodule update --init --recursive
   (`vane-ai==0.2.0`).
 - Full DuckDB source tree ID: `e24da547b83d10b75697b8a40acd684f0a0a8481`;
   native runtime SourceID: `e24da547b8`.
-- Vortex Rust fork: `232a0d321bc5f86dadc7ea5082a93be10fc8c181`.
+- Vortex Rust fork: `95ab99ee46146398dc4c60c66ea1e736261180a3`.
 - Rust: `1.97.1`, with the committed Vane adapter Cargo.lock.
 - Extension vcpkg: `74e6536215718009aae747d86d84b78376bf9e09`.
 - Shared Vane CI tools: `d7316f29add0cc893c5fd126a971ffb78cc39c78`.

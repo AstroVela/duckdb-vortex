@@ -71,7 +71,7 @@ def main():
             require(result.returncode == 0, result.stdout + result.stderr)
         else:
             require(
-                result.returncode != 0
+                result.returncode > 0
                 and expected_error.lower() in result.stderr.lower(),
                 f"Expected {expected_error!r}: {result.stdout}{result.stderr}",
             )
@@ -156,8 +156,15 @@ def main():
             + quote('{"max_check":4096,"internal_results":64,"search_pages":12}'),
         )
         repeated = work / f"repeat-{row}.csv"
+        query_sql = "[" + ",".join(str(value) + "::FLOAT" for value in query) + "]"
+        search_options = quote(
+            '{"max_check":4096,"internal_results":64,"search_pages":12}'
+        )
+        parameterized_call = (
+            f"vortex_index_search({quote(reference)}, $1, $2, backend_options := $3)"
+        )
         run(
-            f"CREATE TEMP TABLE result AS SELECT {columns} FROM {explicit_call} WHERE false;\nPREPARE nearest AS INSERT INTO result SELECT {columns} FROM {explicit_call};\nEXECUTE nearest;\nCOPY (SELECT * FROM result ORDER BY rank) TO {quote(repeated)} (HEADER true);"
+            f"CREATE TEMP TABLE result AS SELECT {columns} FROM {explicit_call} WHERE false;\nPREPARE nearest AS INSERT INTO result SELECT {columns} FROM {parameterized_call};\nEXECUTE nearest({query_sql}, {k}, {search_options});\nCOPY (SELECT * FROM result ORDER BY rank) TO {quote(repeated)} (HEADER true);"
         )
         require(
             output.read_bytes() == repeated.read_bytes(),
@@ -238,6 +245,63 @@ def main():
     run(build(work / "null-index.json", [work / "null.vortex"]) + ";", "NULL")
     require(not (work / "null-index.json").exists(), "NULL build published a reference")
 
+    directories = {path.name for path in work.iterdir() if path.is_dir()}
+    invalid_vectors = [
+        "[1::FLOAT, 2::FLOAT]",
+        "1::FLOAT",
+        "['a', 'b']::VARCHAR[2]",
+        "[true, false]::BOOLEAN[2]",
+        "[1::DOUBLE, 2::DOUBLE]::DOUBLE[2]",
+    ]
+    for case, expression in enumerate(invalid_vectors):
+        invalid_file = work / f"invalid-{case}.vortex"
+        invalid_reference = work / f"invalid-{case}.json"
+        run(
+            f"COPY (SELECT {expression} AS embedding FROM range(128)) TO {quote(invalid_file)} (FORMAT vortex);"
+        )
+        run(build(invalid_reference, [invalid_file]) + ";", "Float32")
+        require(
+            not invalid_reference.exists(), "Invalid vector type published an index"
+        )
+        require(
+            directories == {path.name for path in work.iterdir() if path.is_dir()},
+            "Invalid vector type left a generation or scratch directory",
+        )
+
+    replacement_file = work / "replacement.vortex"
+    replacement_reference = work / "replacement.json"
+    components = ["id::FLOAT"] + [
+        f"((id * {axis + 3}) % {11 + axis})::FLOAT" for axis in range(1, dimension)
+    ]
+    run(
+        f"COPY (SELECT id::UBIGINT AS id, [{','.join(components)}]::FLOAT[{dimension}] AS embedding, 'row-' || id AS label FROM range(5000, 5256) t(id)) TO {quote(replacement_file)} (FORMAT vortex);\n"
+        + build(replacement_reference, [replacement_file])
+        + ";"
+    )
+    parameterized_queries = [
+        f"SELECT * FROM vortex_index_search({quote(reference)}, $1, {k})",
+        f"WITH hits AS (SELECT * FROM vortex_index_search({quote(reference)}, $1, {k})) SELECT * FROM hits",
+        f'SELECT (SELECT "row".id FROM vortex_index_search({quote(reference)}, $1, 1))',
+        f'SELECT "row".id FROM vortex_index_search({quote(reference)}, $1, 1) UNION ALL SELECT 999::UBIGINT WHERE false',
+    ]
+    before = reference.read_bytes()
+    query_sql = "[" + ",".join(str(value) + "::FLOAT" for value in query) + "]"
+    for prepared_query in parameterized_queries:
+        try:
+            run(
+                f"PREPARE nearest AS {prepared_query}; EXECUTE nearest({query_sql});\n"
+                f"COPY (SELECT content FROM read_text({quote(replacement_reference)})) TO {quote(reference)} (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');\n"
+                f"EXECUTE nearest({query_sql});",
+                "reference changed",
+            )
+            require(
+                json.loads(reference.read_bytes())
+                == json.loads(replacement_reference.read_bytes()),
+                "Prepared regression must replace the reference with valid JSON",
+            )
+        finally:
+            reference.write_bytes(before)
+
     before = reference.read_bytes()
     run(
         f"PREPARE nearest AS SELECT * FROM {search(query)}; COPY (SELECT 'changed') TO {quote(reference)} (FORMAT csv); EXECUTE nearest;",
@@ -286,7 +350,12 @@ def main():
         "ranked_original_rows": True,
         "nul_arguments_rejected": True,
         "disabled_local_filesystem_rejected": True,
-        "negative_cases": len(negatives) + 6,
+        "invalid_vector_types_rejected": True,
+        "parameterized_reference_pinned": True,
+        "negative_cases": len(negatives)
+        + 6
+        + len(invalid_vectors)
+        + len(parameterized_queries),
         "reference": str(reference),
     }
     (work / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
