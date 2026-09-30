@@ -62,9 +62,12 @@ required when supplied: `max_check`, `internal_results`, and `search_pages`.
 rejected. SPFresh supports `k <= 4096` and its existing resource budgets apply.
 
 This first implementation is synchronous local SQL, not Ray index execution.
-It requires full coverage and enabled external access. Files, manifest and
-artifacts are verified on every execution; replacing or removing a source
-fails, and prepared queries reject changed reference bytes. WHERE applies
+It requires full coverage, enabled external access, and local filesystem access.
+Disabling `LocalFileSystem` rejects both build and search, including already-bound
+prepared statements. NUL bytes are rejected in every string argument before any
+index I/O. Files, manifest and artifacts are verified on every execution;
+replacing or removing a source fails, and prepared queries reject changed
+reference bytes. WHERE applies
 after candidate retrieval and is not filtered top-k. Exact distance-ordering
 queries are not rewritten to ANN. There is no reader cache or mutable table
 catalog. Build publication is external to DuckDB transactions, so rollback

@@ -165,6 +165,8 @@ def main():
         )
 
     query = vector(133)
+    nul_reference = work / "nul-index.json"
+    blocked_reference = work / "blocked-index.json"
     negatives = [
         (build() + ";", "already exists"),
         (f"SELECT * FROM {search(query, topk=0)};", "between 1"),
@@ -181,9 +183,55 @@ def main():
             f"SET enable_external_access=false; SELECT * FROM {search(query)};",
             "external access",
         ),
+        (
+            f"SELECT * FROM vortex_index_search({quote(reference)} || chr(0) || 'missing', [{','.join(str(value) + '::FLOAT' for value in query)}], {k});",
+            "NUL",
+        ),
+        (
+            f"SELECT * FROM {search(query, suffix=', backend_options := chr(0) || ' + quote('{"unknown":1}'))};",
+            "NUL",
+        ),
     ]
+    build_inputs = [
+        f"[{','.join(map(quote, files))}]",
+        quote(nul_reference),
+        "'embedding'",
+        "'spfresh.static'",
+        quote(options),
+    ]
+    for argument in range(len(build_inputs)):
+        inputs = build_inputs.copy()
+        inputs[argument] = (
+            f"[{quote(files[0])} || chr(0) || 'missing', {quote(files[1])}]"
+            if argument == 0
+            else f"{inputs[argument]} || chr(0) || 'missing'"
+        )
+        negatives.append(
+            (f"SELECT * FROM vortex_index_build({','.join(inputs)});", "NUL")
+        )
+    for operation in [
+        f"SELECT * FROM {search(query)}",
+        build(blocked_reference),
+    ]:
+        for prepared in [False, True]:
+            sql = (
+                f"PREPARE indexed AS {operation}; SET disabled_filesystems='LocalFileSystem'; EXECUTE indexed;"
+                if prepared
+                else f"SET disabled_filesystems='LocalFileSystem'; {operation};"
+            )
+            negatives.append((sql, "LocalFileSystem"))
+    directories = {path.name for path in work.iterdir() if path.is_dir()}
     for sql, message in negatives:
         run(sql, message)
+        require(
+            not nul_reference.exists() and not blocked_reference.exists(),
+            "Rejected arguments or filesystem policy published an index",
+        )
+        require(
+            directories == {path.name for path in work.iterdir() if path.is_dir()},
+            "Rejected operation left a generation or scratch directory",
+        )
+    run(f"SET disabled_filesystems='PipeFileSystem'; SELECT * FROM {search(query)};")
     run(
         f"COPY (SELECT NULL::FLOAT[{dimension}] AS embedding FROM range(128)) TO {quote(work / 'null.vortex')} (FORMAT vortex);"
     )
@@ -236,6 +284,8 @@ def main():
         "prepared_repeat_equal": True,
         "backend_options_parity": True,
         "ranked_original_rows": True,
+        "nul_arguments_rejected": True,
+        "disabled_local_filesystem_rejected": True,
         "negative_cases": len(negatives) + 6,
         "reference": str(reference),
     }
