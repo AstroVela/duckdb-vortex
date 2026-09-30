@@ -39,6 +39,10 @@ cluster, supply `RAY_ADDRESS` before starting Python.
 
 ## Usage
 
+The optional native static-index SQL path is described in
+[Static Index SQL](docs/STATIC_INDEX_SQL.md). It runs local index operations;
+it is not part of the distributed Ray scan/COPY protocol below.
+
 Run all Python blocks in order in one process from a fresh working directory.
 No sample download or cloud service is needed. The local paths below are shared
 by Ray processes on the same physical host. Use new output paths when repeating

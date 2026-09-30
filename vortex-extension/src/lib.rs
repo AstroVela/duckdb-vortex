@@ -6,6 +6,9 @@
 use std::ffi::c_char;
 use std::ffi::c_void;
 
+#[cfg(feature = "index-spfresh")]
+mod index;
+
 /// Global symbol visibility in the Vortex extension:
 /// - Rust functions use C ABI with "_rust" suffix (e.g., vortex_init_rust)
 /// - C++ wrapper functions have the expected name without suffix (e.g., vortex_init)
@@ -17,6 +20,8 @@ use std::ffi::c_void;
 /// The DuckDB extension ABI initialization function.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vortex_init_rust(db: *mut c_void) {
+    #[cfg(feature = "index-spfresh")]
+    index::register();
     unsafe { vortex_duckdb::initialize_extension_from_raw(db) };
 }
 

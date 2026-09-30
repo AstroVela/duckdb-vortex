@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-#![expect(clippy::missing_safety_doc)]
-
 #[cfg(not(vortex_vane_distributed))]
 compile_error!("vortex-extension-vane requires VORTEX_VANE_DISTRIBUTED=1 at compile time");
 
@@ -10,6 +8,10 @@ compile_error!("vortex-extension-vane requires VORTEX_VANE_DISTRIBUTED=1 at comp
 use std::ffi::c_char;
 #[cfg(vortex_vane_distributed)]
 use std::ffi::c_void;
+
+#[cfg(feature = "index-spfresh")]
+#[path = "../../vortex-extension/src/index.rs"]
+mod index;
 
 /// Initialize runtime support and register Vortex through the Vane-specific
 /// C++ loader path. This crate intentionally has no legacy DuckDB registration
@@ -22,6 +24,8 @@ use std::ffi::c_void;
 #[cfg(vortex_vane_distributed)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn vortex_init_vane_rust(loader: *mut c_void) {
+    #[cfg(feature = "index-spfresh")]
+    index::register();
     unsafe { vortex_duckdb::initialize_vane(loader) };
 }
 

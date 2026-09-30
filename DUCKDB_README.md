@@ -1,5 +1,9 @@
 # Vortex DuckDB
 
+For experimental opt-in SPFresh build/search functions, see
+[Static Index SQL](docs/STATIC_INDEX_SQL.md). Default builds do not link a native
+index backend.
+
 This repository is based on https://github.com/duckdb/extension-template, check it out if you want to build and ship
 your own DuckDB extension.
 
@@ -91,7 +95,7 @@ source revision, distributed headers, or required build inputs are absent.
 
 The Vane lane selects `vortex-extension-vane/Cargo.toml`; the ordinary lane
 continues to select `vortex-extension/Cargo.toml`. Both manifests pin
-`AstroVela/vortex@3da8a2848b5d10d028e69471c5c97bd3dc785a03`, which includes the
+`AstroVela/vortex@266b47e817769d32e48349781bd0537d755b6a38`, which includes the
 common DuckDB-filesystem-backed Vortex writer and adapts the distributed
 bind-data enum to the current Vane SDK. The Vane integration manifest
 also pins
