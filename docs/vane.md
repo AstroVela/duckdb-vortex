@@ -39,7 +39,7 @@ source revision, distributed headers, or required build inputs are absent.
 
 The Vane lane selects `vortex-extension-vane/Cargo.toml`; the ordinary lane
 continues to select `vortex-extension/Cargo.toml`. Both manifests pin
-`AstroVela/vortex@887b6a18a18f0372f22832ddd64a4cf021478094`, which includes the
+`AstroVela/vortex@7ed0870687c712fa61fb3fe1666fc7c1c463c1ea`, which includes the
 common DuckDB-filesystem-backed Vortex writer and adapts the distributed
 bind-data enum to the current Vane SDK. The Vane integration manifest
 also pins
