@@ -90,3 +90,6 @@ processes, compares original rows/squared-L2 scores, measures recall against
 exact search, and checks repeat/prepared equality and invalid/stale inputs.
 Per-process logs, CSV results and `summary.json` are retained. This bounded
 fixture is a correctness qualification, not a performance benchmark.
+
+For repeatable same-process performance comparisons and phase diagnostics, see
+[Static index SQL benchmark](INDEX_SQL_BENCHMARK.md).
