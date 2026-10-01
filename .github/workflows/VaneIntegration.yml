@@ -21,6 +21,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  minio-fixture:
+    name: Verify MinIO test fixture
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout object-store qualification harness
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build and start the pinned MinIO fixture
+        shell: bash
+        run: bash test/object_store/start_minio.sh
+
+      - name: Stop isolated MinIO
+        if: always()
+        shell: bash
+        run: docker rm --force vortex-minio >/dev/null 2>&1 || true
+
   native-isolation:
     name: Verify native DuckDB isolation
     if: github.event_name == 'pull_request'
