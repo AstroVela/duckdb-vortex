@@ -72,9 +72,9 @@ jobs:
   vane-extension:
     permissions:
       contents: read
-    uses: AstroVela/vane-extension-ci-tools/.github/workflows/_vane_extension_ci.yml@d7316f29add0cc893c5fd126a971ffb78cc39c78
+    uses: AstroVela/vane-extension-ci-tools/.github/workflows/_vane_extension_ci.yml@9de078021e3cb0ee09d50568aca114e58f2c2014
     with:
-      ci_tools_version: d7316f29add0cc893c5fd126a971ffb78cc39c78
+      ci_tools_version: 9de078021e3cb0ee09d50568aca114e58f2c2014
       manifest: vane-extension.toml
       build_jobs: 8
       run_native_tests: true
