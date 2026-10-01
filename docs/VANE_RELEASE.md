@@ -17,7 +17,7 @@ git submodule update --init --recursive
 - Vortex Rust fork: `3da8a2848b5d10d028e69471c5c97bd3dc785a03`.
 - Rust: `1.97.1`, with the committed Vane adapter Cargo.lock.
 - Extension vcpkg: `74e6536215718009aae747d86d84b78376bf9e09`.
-- Shared Vane CI tools: `d7316f29add0cc893c5fd126a971ffb78cc39c78`.
+- Shared Vane CI tools: `9de078021e3cb0ee09d50568aca114e58f2c2014`.
 - Provider: `vane-extension-vortex`, CPython 3.10–3.14,
   `manylinux_2_28_x86_64`, with no other provider dependencies.
 

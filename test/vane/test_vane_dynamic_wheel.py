@@ -51,7 +51,7 @@ class DynamicWheelTest(unittest.TestCase):
                 "arrow/ArrowConfig.cmake",
                 "arrowflight/ArrowFlightConfig.cmake",
             ):
-                config = dependencies / "x64-linux/share" / name
+                config = dependencies / "x64-linux-release/share" / name
                 config.parent.mkdir(parents=True, exist_ok=True)
                 config.touch()
             environment = {
