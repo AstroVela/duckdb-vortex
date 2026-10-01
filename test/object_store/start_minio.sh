@@ -3,8 +3,29 @@ set -euo pipefail
 
 : "${GITHUB_ENV:?GITHUB_ENV must name the GitHub Actions environment file}"
 
-# Pin the upstream Quay release and its immutable multi-platform image index.
-minio_image='quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e'
+# Upstream registry images are no longer public. Build the Linux amd64 test
+# image from the same release's static binary, verified before Docker sees it.
+minio_release='RELEASE.2025-09-07T16-13-09Z'
+minio_sha256='7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f'
+minio_image="vortex-minio-ci:${minio_release}"
+minio_build_dir="$(mktemp -d)"
+trap 'rm -rf "$minio_build_dir"' EXIT
+mkdir -p "$minio_build_dir/rootfs/data" "$minio_build_dir/rootfs/tmp"
+chmod 1777 "$minio_build_dir/rootfs/tmp"
+curl --fail --location --silent --show-error \
+  --retry 3 --connect-timeout 10 --max-time 180 \
+  "https://github.com/minio/minio/releases/download/${minio_release}/minio.linux-amd64.${minio_release}" \
+  --output "$minio_build_dir/rootfs/minio"
+printf '%s  %s\n' "$minio_sha256" "$minio_build_dir/rootfs/minio" | sha256sum --check --strict
+chmod 0755 "$minio_build_dir/rootfs/minio"
+cat >"$minio_build_dir/Dockerfile" <<'DOCKERFILE'
+FROM scratch
+COPY rootfs /
+WORKDIR /data
+ENTRYPOINT ["/minio"]
+DOCKERFILE
+docker build --platform linux/amd64 --tag "$minio_image" "$minio_build_dir"
+
 minio_access_key="vortex$(openssl rand -hex 8)"
 minio_secret_key="$(openssl rand -hex 24)"
 minio_endpoint='http://127.0.0.1:9000'
