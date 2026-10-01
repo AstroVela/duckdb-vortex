@@ -28,6 +28,8 @@ PHASES = (
     "result_materialization_ms",
 )
 BUILD_VECTOR_LIMIT = 256 * 1024 * 1024
+POSTING_PAGE_BYTES = 4096
+POSTING_BUFFER_LIMIT_BYTES = 256 * 1024 * 1024
 
 
 def require(condition, message):
@@ -122,6 +124,15 @@ def validate_hits(hits, query, k, rows):
     return [(hit["id"], hit["distance"]) for hit in hits]
 
 
+def _valid_timing_ms(value):
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value) and value >= 0
+    except OverflowError:
+        return False
+
+
 def parse_phases(stderr, count):
     events = []
     for line in stderr.splitlines():
@@ -133,16 +144,23 @@ def parse_phases(stderr, count):
             isinstance(event, dict)
             and event.get("event") == "vortex_index_search_timing"
         ):
-            require(event.get("format_version") == 1, "Unsupported timing event format")
-            phases = event["phases"]
+            version = event.get("format_version")
+            require(
+                type(version) is int and version == 1, "Unsupported timing event format"
+            )
+            phases = event.get("phases")
+            require(isinstance(phases, dict), "Timing event phases must be an object")
             require(set(phases) == set(PHASES), "Incomplete timing phases")
             require(
-                all(math.isfinite(ms) and ms >= 0 for ms in phases.values()),
+                all(_valid_timing_ms(ms) for ms in phases.values()),
                 "Invalid phase timings",
             )
+            total_ms = event.get("total_ms")
+            require(_valid_timing_ms(total_ms), "Invalid total timing")
             require(
-                math.isfinite(event["total_ms"])
-                and math.isclose(sum(phases.values()), event["total_ms"], abs_tol=1e-6),
+                math.isclose(
+                    sum(float(ms) for ms in phases.values()), total_ms, abs_tol=1e-6
+                ),
                 "Phase timings do not sum to the Rust operation total",
             )
             events.append(event)
@@ -266,7 +284,8 @@ def main(argv=None):
     require(1 <= args.replicas <= 8, "Invalid replica count")
     require(1 <= args.k <= min(4096, args.rows), "Invalid k")
     require(
-        args.posting_page_limit * max(64, args.k) * 4096 <= 256 * 1024 * 1024,
+        args.posting_page_limit * max(64, args.k) * POSTING_PAGE_BYTES
+        <= POSTING_BUFFER_LIMIT_BYTES,
         "Query exceeds the current SQL factory's 256 MiB posting buffer budget",
     )
     require(
