@@ -13,7 +13,7 @@ env:
   VANE_EXPECTED_PACKAGE_VERSION: 0.2.0
   VANE_EXPECTED_FORK_VERSION: v1.5.5-vane.5489cd8a64
   VANE_EXPECTED_DUCKDB_SOURCE_ID: e24da547b83d10b75697b8a40acd684f0a0a8481
-  VORTEX_EXPECTED_REVISION: 3da8a2848b5d10d028e69471c5c97bd3dc785a03
+  VORTEX_EXPECTED_REVISION: c57b1be33ec41592776be1962d3ce0a8ea3eba28
   VORTEX_EXPECTED_VERSION: 0.1.0
 
 concurrency:
@@ -21,6 +21,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  minio-fixture:
+    name: Verify MinIO test fixture
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout object-store qualification harness
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build and start the pinned MinIO fixture
+        shell: bash
+        run: bash test/object_store/start_minio.sh
+
+      - name: Stop isolated MinIO
+        if: always()
+        shell: bash
+        run: docker rm --force vortex-minio >/dev/null 2>&1 || true
+
   native-isolation:
     name: Verify native DuckDB isolation
     if: github.event_name == 'pull_request'

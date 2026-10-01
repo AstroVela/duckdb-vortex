@@ -19,6 +19,24 @@ endif()
 
 option(USE_SHARED_VORTEX OFF)
 option(VORTEX_VANE_DISTRIBUTED "Build Vane distributed Vortex support" OFF)
+option(VORTEX_ENABLE_INDEX_SPFRESH "Enable static Vortex index SQL with SPFresh" OFF)
+set(VORTEX_SPFRESH_NATIVE "$ENV{VORTEX_SPFRESH_NATIVE}" CACHE PATH "Qualified PIC SPFresh native build directory")
+set(VORTEX_INDEX_CARGO_FLAGS)
+if(VORTEX_ENABLE_INDEX_SPFRESH)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+        message(FATAL_ERROR "Static SPFresh SQL currently requires Linux x86_64")
+    endif()
+    if(NOT IS_ABSOLUTE "${VORTEX_SPFRESH_NATIVE}" OR NOT EXISTS "${VORTEX_SPFRESH_NATIVE}/libspfresh_core.a"
+       OR NOT EXISTS "${VORTEX_SPFRESH_NATIVE}/libspfresh_distance.a")
+        message(FATAL_ERROR "VORTEX_ENABLE_INDEX_SPFRESH requires a qualified VORTEX_SPFRESH_NATIVE build")
+    endif()
+    find_package(OpenMP REQUIRED COMPONENTS CXX)
+    file(STRINGS "${VORTEX_SPFRESH_NATIVE}/zstd-library.txt" VORTEX_SPFRESH_ZSTD LIMIT_COUNT 1)
+    if(NOT IS_ABSOLUTE "${VORTEX_SPFRESH_ZSTD}" OR NOT EXISTS "${VORTEX_SPFRESH_ZSTD}")
+        message(FATAL_ERROR "SPFresh qualification must identify an existing zstd library")
+    endif()
+    list(APPEND VORTEX_INDEX_CARGO_FLAGS --features index-spfresh)
+endif()
 option(VORTEX_VANE_DYNAMIC_PROVIDER
        "Build a self-contained Vane dynamic-provider artifact" OFF)
 if(VORTEX_VANE_DYNAMIC_PROVIDER)
@@ -110,7 +128,7 @@ corrosion_import_crate(
     MANIFEST_PATH ${VORTEX_RUST_MANIFEST}
     CRATES vortex-extension
     CRATE_TYPES ${VORTEX_LIB_TYPE}
-    FLAGS --crate-type=${VORTEX_LIB_TYPE} ${VORTEX_CARGO_LOCK_FLAGS}
+    FLAGS --crate-type=${VORTEX_LIB_TYPE} ${VORTEX_CARGO_LOCK_FLAGS} ${VORTEX_INDEX_CARGO_FLAGS}
     ${VORTEX_CARGO_PROFILE}
 )
 
@@ -121,6 +139,9 @@ set(VORTEX_CARGO_ENV_VARS
 )
 if(VORTEX_VANE_DISTRIBUTED)
     list(APPEND VORTEX_CARGO_ENV_VARS "VORTEX_VANE_DISTRIBUTED=1")
+endif()
+if(VORTEX_ENABLE_INDEX_SPFRESH)
+    list(APPEND VORTEX_CARGO_ENV_VARS "VORTEX_SPFRESH_NATIVE=${VORTEX_SPFRESH_NATIVE}")
 endif()
 message("Forwarding DUCKDB_VERSION=${DUCKDB_VERSION} to Cargo")
 message("Forwarding DUCKDB_SOURCE_DIR=${DUCKDB_MODULE_BASE_DIR} to Cargo")
@@ -156,6 +177,14 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME}
     ${SECURITY_FRAMEWORK}
     ${CORE_FOUNDATION_FRAMEWORK}
 )
+
+if(VORTEX_ENABLE_INDEX_SPFRESH)
+    # Corrosion discovers Rust's standard libraries, not backend build-script
+    # runtime libraries. The native archives themselves are bundled by Cargo.
+    foreach(VORTEX_INDEX_TARGET ${EXTENSION_NAME} ${LOADABLE_EXTENSION_NAME})
+        target_link_libraries(${VORTEX_INDEX_TARGET} ${OpenMP_CXX_LIBRARIES} "${VORTEX_SPFRESH_ZSTD}")
+    endforeach()
+endif()
 
 if(VORTEX_VANE_DYNAMIC_PROVIDER)
     # The Rust archive itself calls DuckDB's C and C++ APIs. Resolve those
@@ -197,6 +226,10 @@ if(BUILD_VORTEX_DISTRIBUTED_TESTS)
     add_executable(vortex_distributed_protocol_test EXCLUDE_FROM_ALL
                    test/cpp/vortex_distributed_protocol_test.cpp)
     target_compile_features(vortex_distributed_protocol_test PRIVATE cxx_std_20)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        # C++20 header constants must coexist with DuckDB's C++11 definitions.
+        target_compile_options(vortex_distributed_protocol_test PRIVATE -fno-gnu-unique)
+    endif()
     target_link_libraries(vortex_distributed_protocol_test duckdb_static)
     link_extension_libraries(vortex_distributed_protocol_test "")
 endif()
