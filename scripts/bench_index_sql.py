@@ -157,6 +157,11 @@ def parse_phases(stderr, count):
             )
             total_ms = event.get("total_ms")
             require(_valid_timing_ms(total_ms), "Invalid total timing")
+            if "provider_cache_hit" in event:
+                require(
+                    type(event["provider_cache_hit"]) is bool,
+                    "Invalid provider cache status",
+                )
             require(
                 math.isclose(
                     sum(float(ms) for ms in phases.values()), total_ms, abs_tol=1e-6
@@ -172,12 +177,45 @@ def parse_phases(stderr, count):
     return events
 
 
+def search_workload(engine, args, queries, inventory, reference, rounds):
+    def select(vector):
+        vector = f"{vector}::FLOAT[{args.dimension}]"
+        if engine == "exact":
+            return (
+                "SELECT id, label, embedding, "
+                f"pow(array_distance(embedding, {vector}), 2) AS distance "
+                f"FROM read_vortex({inventory}) ORDER BY distance, id LIMIT {args.k};"
+            )
+        return (
+            'SELECT "row".id AS id, "row".label AS label, '
+            '"row".embedding AS embedding, distance '
+            f"FROM vortex_index_search({quote(reference)}, {vector}::FLOAT[], {args.k}) "
+            "ORDER BY rank;"
+        )
+
+    prepared = args.execution_mode == "prepared"
+    setup = [f"PREPARE measured_query AS {select('$1')}"] if prepared else []
+    statements, labels = [], []
+    for round_id in range(rounds):
+        for query_id, query in enumerate(queries):
+            label = f"round-{round_id}-query-{query_id}"
+            vector = "[" + ",".join(map(str, query)) + "]"
+            sql = (
+                f"EXECUTE measured_query({vector}::FLOAT[{args.dimension}]);"
+                if prepared
+                else select(vector)
+            )
+            statements.append((label, sql))
+            labels.append((label, round_id, query_id))
+    return setup, statements, labels
+
+
 class Runner:
     def __init__(self, args, root):
         self.args, self.root = args, root
         self.workers = {}
 
-    def run(self, name, statements, timings=False):
+    def run(self, name, statements, timings=False, setup=()):
         directory = self.root / name
         directory.mkdir()
         script = [
@@ -193,6 +231,7 @@ class Runner:
             "PRAGMA version;",
             ".output",
         ]
+        script += list(setup)
         for label, sql in statements:
             script += [
                 "SET enable_profiling='json';",
@@ -271,6 +310,9 @@ def main(argv=None):
     parser.add_argument("--timeout", type=float, default=1800)
     parser.add_argument("--time-binary", type=Path, default=Path("/usr/bin/time"))
     parser.add_argument("--skip-stage-timings", action="store_true")
+    parser.add_argument(
+        "--execution-mode", choices=["ad-hoc", "prepared"], default="ad-hoc"
+    )
     args = parser.parse_args(argv)
     require(64 <= args.rows <= 1_000_000, "Rows must be between 64 and 1,000,000")
     require(1 <= args.dimension <= 4096, "Invalid dimension")
@@ -345,27 +387,15 @@ def main(argv=None):
     build_ms = profiles["latency"] * 1000
     samples, results = [], {}
     for engine in ("exact", "ann"):
-        statements, labels = [], []
-        for round_id in range(args.warmup_rounds + args.rounds):
-            for query_id, query in enumerate(queries):
-                label = f"round-{round_id}-query-{query_id}"
-                vector = "[" + ",".join(map(str, query)) + f"]::FLOAT[{args.dimension}]"
-                if engine == "exact":
-                    sql = (
-                        "SELECT id, label, embedding, "
-                        f"pow(array_distance(embedding, {vector}), 2) AS distance "
-                        f"FROM read_vortex({inventory}) ORDER BY distance, id LIMIT {args.k};"
-                    )
-                else:
-                    sql = (
-                        'SELECT "row".id AS id, "row".label AS label, '
-                        '"row".embedding AS embedding, distance '
-                        f"FROM vortex_index_search({quote(reference)}, {vector}::FLOAT[], {args.k}) "
-                        "ORDER BY rank;"
-                    )
-                statements.append((label, sql))
-                labels.append((label, round_id, query_id))
-        directory = runner.run(engine, statements)
+        setup, statements, labels = search_workload(
+            engine,
+            args,
+            queries,
+            inventory,
+            reference,
+            args.warmup_rounds + args.rounds,
+        )
+        directory = runner.run(engine, statements, setup=setup)
         for index, (label, round_id, query_id) in enumerate(labels):
             profile = json.loads((directory / (label + ".profile.json")).read_text())
             require(
@@ -420,25 +450,59 @@ def main(argv=None):
         }
     write_json(root / "samples.json", samples)
     phase_report = None
+    phase_first_query = None
+    phase_after_first_query = None
+    cache_status = None
     if not args.skip_stage_timings:
-        ann_sql = [sql for _, sql in statements[: args.queries]]
+        setup, statements, labels = search_workload(
+            "ann",
+            args,
+            queries,
+            inventory,
+            reference,
+            2 if args.execution_mode == "prepared" else 1,
+        )
         diagnostic = runner.run(
             "diagnostic",
-            [(f"query-{i}", sql) for i, sql in enumerate(ann_sql)],
+            statements,
             timings=True,
+            setup=setup,
         )
-        events = parse_phases((diagnostic / "stderr.log").read_text(), args.queries)
-        for i, event in enumerate(events):
-            hits = json.loads((diagnostic / f"query-{i}.result.json").read_text())
+        events = parse_phases((diagnostic / "stderr.log").read_text(), len(labels))
+        for (label, _, query_id), event in zip(labels, events):
+            hits = json.loads((diagnostic / f"{label}.result.json").read_text())
             require(
-                validate_hits(hits, queries[i], args.k, args.rows) == results["ann", i],
+                validate_hits(hits, queries[query_id], args.k, args.rows)
+                == results["ann", query_id],
                 "Diagnostics changed ranked results",
             )
         write_json(root / "stages.json", events)
+        write_json(
+            root / "stage-samples.json",
+            [
+                {"round": r, "query": q, "first_in_process": i == 0, "event": event}
+                for i, ((_, r, q), event) in enumerate(zip(labels, events))
+            ],
+        )
         phase_report = {
             phase: summarize([event["phases"][phase] for event in events])
             for phase in PHASES
         }
+        phase_first_query = {
+            "total_ms": events[0]["total_ms"],
+            "phases": events[0]["phases"],
+        }
+        if len(events) > 1:
+            phase_after_first_query = {
+                phase: summarize([event["phases"][phase] for event in events[1:]])
+                for phase in PHASES
+            }
+        if all("provider_cache_hit" in event for event in events):
+            cache_status = {
+                "samples": len(events),
+                "hits": sum(event["provider_cache_hit"] for event in events),
+                "first_query_hit": events[0]["provider_cache_hit"],
+            }
 
     descriptor = json.loads(reference.read_text())
     generation = root / descriptor["generation"]["generation"]
@@ -458,6 +522,8 @@ def main(argv=None):
             "rss": "GNU time peak RSS per worker, including engine startup",
             "stages": "Separate diagnostic process; successful Rust execution only; excludes SQL bind",
             "order": "Exact scan before ANN; timings are not run concurrently",
+            "execution_mode": args.execution_mode,
+            "prepare": "One owner per search worker in prepared mode; setup excluded from query latency",
         },
         "platform": {
             "python": platform.python_version(),
@@ -484,6 +550,9 @@ def main(argv=None):
         "repeat_results_equal": True,
         "engines": engines,
         "stages": phase_report,
+        "stages_first_query": phase_first_query,
+        "stages_after_first_query": phase_after_first_query,
+        "diagnostic_provider_cache": cache_status,
         "workers": runner.workers,
     }
     write_json(root / "summary.json", report)

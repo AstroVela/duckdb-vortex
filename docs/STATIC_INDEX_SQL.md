@@ -67,11 +67,47 @@ Disabling `LocalFileSystem` rejects both build and search, including already-bou
 prepared statements. NUL bytes are rejected in every string argument before any
 index I/O. Files, manifest and artifacts are verified on every execution;
 replacing or removing a source fails, and prepared queries reject changed
-reference bytes. WHERE applies
-after candidate retrieval and is not filtered top-k. Exact distance-ordering
-queries are not rewritten to ANN. There is no reader cache or mutable table
-catalog. Build publication is external to DuckDB transactions, so rollback
-does not undo it. Owners manage unreferenced generations and crash leftovers.
+reference bytes. WHERE applies after candidate retrieval and is not filtered
+top-k. Exact distance-ordering queries are not rewritten to ANN. There is no
+mutable table catalog. Build publication is external to DuckDB transactions, so
+rollback does not undo it. Owners manage unreferenced generations and crash leftovers.
+
+## Prepared Provider Reuse
+
+With a companion Vortex revision supporting prepared-provider reuse, a prepared
+statement can retain the generic `Arc<dyn Index>` handle for its bound reference.
+SPFresh is one implementation of that interface; SQL does not introduce a native
+SPFresh cache API. Preparing still performs no provider open. Execution can retain
+the first successfully opened provider, and later executions of the same owner
+can reuse it, including parameter and catalog rebinds.
+
+```sql
+PREPARE nearest AS
+SELECT rank, distance, "row".id
+FROM vortex_index_search('/indexes/embedding.json', $1::FLOAT[], 10)
+ORDER BY rank;
+
+EXECUTE nearest([1,2,3,4,5,6,7,8]::FLOAT[]);
+EXECUTE nearest([2,3,4,5,6,7,8,9]::FLOAT[]);
+DEALLOCATE nearest;
+```
+
+Reference identity, source files, manifest, artifacts, and DuckDB access policy
+are still verified on every execution before a cached handle is used. There is
+no validation-byte or source-reader cache. Independent prepared owners and
+connections do not share handles. Deallocation or C API handle destruction
+releases the owner's retained handles and private 0700 scratch directories;
+native handles close before scratch is removed.
+
+Each connection may retain at most eight handles with a combined 256 MiB of
+sealed artifact bytes. This is not an RSS or native-heap bound, and it does not
+raise existing builder or per-search resource limits. A full budget or oversized
+generation falls back to the uncached open/search/close path. Failed opens
+release their reservation and scratch. Ad-hoc statements remain uncached.
+
+Choosing prepared SQL alone does not enable reuse in an older pinned artifact.
+Align the outer dependency with the companion Vortex revision before building;
+diagnostic events expose `provider_cache_hit` when this implementation is present.
 
 ## Qualification
 

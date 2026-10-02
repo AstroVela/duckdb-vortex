@@ -5,6 +5,7 @@ import csv
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -194,3 +195,42 @@ def test_statistics_use_interpolated_percentiles_and_reject_nonfinite_values():
     assert summary["p95_ms"] == pytest.approx(3.85)
     with pytest.raises(RuntimeError, match="Invalid"):
         bench.summarize([float("nan")])
+
+
+@pytest.mark.parametrize("engine", ["exact", "ann"])
+@pytest.mark.parametrize("mode", ["ad-hoc", "prepared"])
+def test_workload_prepares_one_owner_and_preserves_query_order(engine, mode):
+    args = SimpleNamespace(dimension=2, k=1, execution_mode=mode)
+    queries = [[1.0, 2.0], [3.0, 4.0]]
+    setup, statements, labels = bench.search_workload(
+        engine, args, queries, "['/data.vortex']", Path("/index.json"), 3
+    )
+    assert len(statements) == 6
+    assert labels == [
+        (f"round-{r}-query-{q}", r, q) for r in range(3) for q in range(2)
+    ]
+    assert [label for label, _ in statements] == [label for label, _, _ in labels]
+    if mode == "prepared":
+        assert len(setup) == 1
+        assert setup[0].startswith("PREPARE measured_query AS SELECT")
+        assert "$1::FLOAT[2]" in setup[0]
+        assert all(sql.startswith("EXECUTE measured_query(") for _, sql in statements)
+        assert statements[0][1] == statements[2][1] == statements[4][1]
+    else:
+        assert setup == []
+        assert all(sql.startswith("SELECT") for _, sql in statements)
+    assert "[1.0,2.0]::FLOAT[2]" in statements[0][1]
+    assert "[3.0,4.0]::FLOAT[2]" in statements[1][1]
+
+
+@pytest.mark.parametrize("value", [None, 0, "true", []])
+def test_phase_events_reject_invalid_cache_status(timing_event, value):
+    timing_event["provider_cache_hit"] = value
+    with pytest.raises(RuntimeError, match="cache status"):
+        bench.parse_phases(json.dumps(timing_event), 1)
+
+
+@pytest.mark.parametrize("value", [False, True])
+def test_phase_events_accept_boolean_cache_status(timing_event, value):
+    timing_event["provider_cache_hit"] = value
+    assert bench.parse_phases(json.dumps(timing_event), 1) == [timing_event]
