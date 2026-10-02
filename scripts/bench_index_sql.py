@@ -7,6 +7,7 @@
 import argparse
 import csv
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -118,7 +119,7 @@ def validate_hits(hits, query, k, rows):
             "Squared-L2 distance does not match the returned original row",
         )
     require(
-        all(a["distance"] <= b["distance"] for a, b in zip(hits, hits[1:])),
+        all(a["distance"] <= b["distance"] for a, b in itertools.pairwise(hits)),
         "Search results are not ordered by distance",
     )
     return [(hit["id"], hit["distance"]) for hit in hits]
@@ -162,6 +163,20 @@ def parse_phases(stderr, count):
                     type(event["provider_cache_hit"]) is bool,
                     "Invalid provider cache status",
                 )
+            if "validation_mode" in event:
+                require(
+                    event["validation_mode"] in ("strict", "snapshot"),
+                    "Invalid validation mode",
+                )
+            if "snapshot_cache_hit" in event:
+                require(
+                    type(event["snapshot_cache_hit"]) is bool
+                    and (
+                        not event["snapshot_cache_hit"]
+                        or event.get("validation_mode") == "snapshot"
+                    ),
+                    "Invalid snapshot cache status",
+                )
             require(
                 math.isclose(
                     sum(float(ms) for ms in phases.values()), total_ms, abs_tol=1e-6
@@ -177,7 +192,42 @@ def parse_phases(stderr, count):
     return events
 
 
+def snapshot_cache_status(events, validation_mode, prepared):
+    if validation_mode == "snapshot":
+        require(
+            all(event.get("validation_mode") == "snapshot" for event in events),
+            "Missing or mismatched snapshot validation mode",
+        )
+        expected = [False] + [prepared] * (len(events) - 1)
+        require(
+            [event.get("snapshot_cache_hit") for event in events] == expected,
+            "Expected an initial verified snapshot and owner-scoped snapshot hits",
+        )
+    else:
+        require(
+            all(
+                event.get("validation_mode", "strict") == "strict"
+                and not event.get("snapshot_cache_hit", False)
+                for event in events
+            ),
+            "Strict validation cannot use snapshot cache hits",
+        )
+    if not all("snapshot_cache_hit" in event for event in events):
+        return None
+    return {
+        "samples": len(events),
+        "hits": sum(event["snapshot_cache_hit"] for event in events),
+        "first_query_hit": events[0]["snapshot_cache_hit"],
+    }
+
+
 def search_workload(engine, args, queries, inventory, reference, rounds):
+    validation_mode = getattr(args, "validation_mode", "strict")
+    require(validation_mode in ("strict", "snapshot"), "Invalid validation mode")
+    mode_argument = (
+        ", validation_mode := 'snapshot'" if validation_mode == "snapshot" else ""
+    )
+
     def select(vector):
         vector = f"{vector}::FLOAT[{args.dimension}]"
         if engine == "exact":
@@ -189,7 +239,7 @@ def search_workload(engine, args, queries, inventory, reference, rounds):
         return (
             'SELECT "row".id AS id, "row".label AS label, '
             '"row".embedding AS embedding, distance '
-            f"FROM vortex_index_search({quote(reference)}, {vector}::FLOAT[], {args.k}) "
+            f"FROM vortex_index_search({quote(reference)}, {vector}::FLOAT[], {args.k}{mode_argument}) "
             "ORDER BY rank;"
         )
 
@@ -268,6 +318,7 @@ class Runner:
         ):
             result = subprocess.run(
                 command,
+                check=False,
                 stdin=stdin,
                 stdout=stdout,
                 stderr=stderr,
@@ -312,6 +363,9 @@ def main(argv=None):
     parser.add_argument("--skip-stage-timings", action="store_true")
     parser.add_argument(
         "--execution-mode", choices=["ad-hoc", "prepared"], default="ad-hoc"
+    )
+    parser.add_argument(
+        "--validation-mode", choices=["strict", "snapshot"], default="strict"
     )
     args = parser.parse_args(argv)
     require(64 <= args.rows <= 1_000_000, "Rows must be between 64 and 1,000,000")
@@ -358,10 +412,12 @@ def main(argv=None):
         prepare.append(
             (
                 f"file-{index}",
-                f"COPY (SELECT id, embedding::FLOAT[{args.dimension}] AS embedding, "
-                f"'row-' || id AS label FROM read_csv({quote(csv_path)}, header=true, "
-                "columns={'id':'BIGINT','embedding':'VARCHAR'})) "
-                f"TO {quote(file)} (FORMAT vortex);",
+                (
+                    f"COPY (SELECT id, embedding::FLOAT[{args.dimension}] AS embedding, "
+                    f"'row-' || id AS label FROM read_csv({quote(csv_path)}, header=true, "
+                    "columns={'id':'BIGINT','embedding':'VARCHAR'})) "
+                    f"TO {quote(file)} (FORMAT vortex);"
+                ),
             )
         )
     runner.run("prepare", prepare)
@@ -378,8 +434,10 @@ def main(argv=None):
         [
             (
                 "build",
-                f"SELECT * FROM vortex_index_build({inventory}, {quote(reference)}, "
-                f"'embedding', 'spfresh.static', {quote(json.dumps(build_options))});",
+                (
+                    f"SELECT * FROM vortex_index_build({inventory}, {quote(reference)}, "
+                    f"'embedding', 'spfresh.static', {quote(json.dumps(build_options))});"
+                ),
             )
         ],
     )
@@ -453,6 +511,7 @@ def main(argv=None):
     phase_first_query = None
     phase_after_first_query = None
     cache_status = None
+    snapshot_status = None
     if not args.skip_stage_timings:
         setup, statements, labels = search_workload(
             "ann",
@@ -469,6 +528,9 @@ def main(argv=None):
             setup=setup,
         )
         events = parse_phases((diagnostic / "stderr.log").read_text(), len(labels))
+        snapshot_status = snapshot_cache_status(
+            events, args.validation_mode, args.execution_mode == "prepared"
+        )
         for (label, _, query_id), event in zip(labels, events):
             hits = json.loads((diagnostic / f"{label}.result.json").read_text())
             require(
@@ -523,6 +585,7 @@ def main(argv=None):
             "stages": "Separate diagnostic process; successful Rust execution only; excludes SQL bind",
             "order": "Exact scan before ANN; timings are not run concurrently",
             "execution_mode": args.execution_mode,
+            "validation_mode": args.validation_mode,
             "prepare": "One owner per search worker in prepared mode; setup excluded from query latency",
         },
         "platform": {
@@ -553,6 +616,7 @@ def main(argv=None):
         "stages_first_query": phase_first_query,
         "stages_after_first_query": phase_after_first_query,
         "diagnostic_provider_cache": cache_status,
+        "diagnostic_snapshot_cache": snapshot_status,
         "workers": runner.workers,
     }
     write_json(root / "summary.json", report)

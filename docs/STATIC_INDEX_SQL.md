@@ -65,7 +65,8 @@ This first implementation is synchronous local SQL, not Ray index execution.
 It requires full coverage, enabled external access, and local filesystem access.
 Disabling `LocalFileSystem` rejects both build and search, including already-bound
 prepared statements. NUL bytes are rejected in every string argument before any
-index I/O. Files, manifest and artifacts are verified on every execution;
+index I/O. The default `validation_mode := 'strict'` verifies files, manifest
+and artifacts on every execution;
 replacing or removing a source fails, and prepared queries reject changed
 reference bytes. WHERE applies after candidate retrieval and is not filtered
 top-k. Exact distance-ordering queries are not rewritten to ANN. There is no
@@ -92,9 +93,10 @@ EXECUTE nearest([2,3,4,5,6,7,8,9]::FLOAT[]);
 DEALLOCATE nearest;
 ```
 
-Reference identity, source files, manifest, artifacts, and DuckDB access policy
-are still verified on every execution before a cached handle is used. There is
-no validation-byte or source-reader cache. Independent prepared owners and
+In the default strict mode, reference identity, source files, manifest, artifacts,
+and DuckDB access policy are still verified on every execution before a cached
+handle is used. Strict mode has no validation-byte or source-reader cache.
+Independent prepared owners and
 connections do not share handles. Deallocation or C API handle destruction
 releases the owner's retained handles and private 0700 scratch directories;
 native handles close before scratch is removed.
@@ -102,12 +104,73 @@ native handles close before scratch is removed.
 Each connection may retain at most eight handles with a combined 256 MiB of
 sealed artifact bytes. This is not an RSS or native-heap bound, and it does not
 raise existing builder or per-search resource limits. A full budget or oversized
-generation falls back to the uncached open/search/close path. Failed opens
-release their reservation and scratch. Ad-hoc statements remain uncached.
+generation falls back to the uncached open/search/close path in strict mode.
+Failed opens release their reservation and scratch. Ad-hoc strict statements
+remain uncached.
 
 Choosing prepared SQL alone does not enable reuse in an older pinned artifact.
 Align the outer dependency with the companion Vortex revision before building;
 diagnostic events expose `provider_cache_hit` when this implementation is present.
+
+## Explicit Snapshot Mode
+
+With a snapshot-capable companion Vortex revision, the separate named option
+`validation_mode := 'snapshot'` retains both the verified `LocalFileSource` and
+the generic provider index for the original prepared owner. It does not belong
+in the provider's `backend_options` JSON. The strict default is unchanged.
+
+```sql
+PREPARE nearest_snapshot AS
+SELECT rank, distance, "row".id
+FROM vortex_index_search(
+    '/indexes/embedding.json', $1::FLOAT[], 10,
+    validation_mode := 'snapshot'
+)
+ORDER BY rank;
+
+EXECUTE nearest_snapshot([1,2,3,4,5,6,7,8]::FLOAT[]);
+EXECUTE nearest_snapshot([2,3,4,5,6,7,8,9]::FLOAT[]);
+DEALLOCATE nearest_snapshot;
+```
+
+PREPARE still performs no provider/source open. The first execution fully validates
+the source, sealed manifest and artifacts before opening them. A successfully
+opened index and its verified source are retained even if subsequent query work
+fails; failed verification or provider open retains nothing. Later executions
+use the same in-memory source bytes and index, including original-row fetching.
+Replacing, corrupting or deleting the original source, manifest or artifacts
+after that open does not update or invalidate the retained view. This is not
+filesystem-atomic capture or DuckDB transactional
+snapshot isolation, and writers must remain stopped during initial verification.
+
+Every execution still checks reference identity and DuckDB access policy;
+disabling external access or `LocalFileSystem` rejects even a retained snapshot.
+Changing the reference is rejected, not silently adopted. Publish a new generation
+and reference, then prepare a new owner to accept and validate it. Query vectors,
+`k` and backend options may vary without changing the retained source. Mode names
+are case-sensitive, and NULL, unknown values and NUL bytes are rejected.
+
+Snapshot and strict scans have distinct cache keys. A strict scan in an owner
+containing a snapshot scan still performs full validation. Independent prepared
+owners and connections do not share handles or sources. C API handles and SQL
+PREPARE owners have the same lifetime rules; ad-hoc statements do not share a
+snapshot across independent queries. A live prepared owner is required at
+execution. Deallocation releases retained bytes, handles and scratch.
+
+The existing aggregate eight-handle and 256 MiB artifact-byte limits apply to
+both modes. A connection may additionally retain at most 512 MiB of encoded
+source bytes. These are retained input budgets, not RSS bounds: decoded arrays,
+metadata, native heaps and transient initial verification consume additional
+memory. Snapshot mode reports an explicit budget error instead of falling back
+to rereading a potentially different view. Dropping an owner frees its capacity;
+failed provider opens also release reservations and scratch. The strict mode's
+uncached fallback remains unchanged. Native workspace reuse is not enabled.
+
+Diagnostics add `validation_mode` and `snapshot_cache_hit`; the first execution
+is a snapshot miss, and subsequent retained executions are hits. See the
+[benchmark results](INDEX_SQL_BENCHMARK.md#explicit-snapshot-comparison) for the
+first-call cost and hot-query comparison; do not treat hot latency as cold-disk
+or production-wheel performance.
 
 ## Qualification
 

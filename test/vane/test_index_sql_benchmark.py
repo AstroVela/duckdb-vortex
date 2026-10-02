@@ -76,6 +76,101 @@ def test_phase_events_require_complete_correlated_samples(timing_event):
 
 
 @pytest.mark.parametrize(
+    "mode,hit", [("strict", False), ("snapshot", False), ("snapshot", True)]
+)
+def test_snapshot_timing_metadata_is_preserved(timing_event, mode, hit):
+    event = {**timing_event, "validation_mode": mode, "snapshot_cache_hit": hit}
+    assert bench.parse_phases(json.dumps(event), 1) == [event]
+
+
+@pytest.mark.parametrize(
+    "fields,message",
+    [
+        ({"validation_mode": "unknown"}, "validation mode"),
+        ({"validation_mode": None}, "validation mode"),
+        ({"snapshot_cache_hit": True}, "snapshot cache"),
+        ({"validation_mode": "strict", "snapshot_cache_hit": True}, "snapshot cache"),
+        ({"validation_mode": "snapshot", "snapshot_cache_hit": 1}, "snapshot cache"),
+    ],
+)
+def test_invalid_snapshot_timing_metadata_fails(timing_event, fields, message):
+    with pytest.raises(RuntimeError, match=message):
+        bench.parse_phases(json.dumps({**timing_event, **fields}), 1)
+
+
+@pytest.mark.parametrize("mode", ["strict", "snapshot"])
+@pytest.mark.parametrize("prepared", [False, True])
+def test_snapshot_diagnostics_confirm_owner_scope(timing_event, mode, prepared):
+    hit = mode == "snapshot" and prepared
+    events = [
+        {**timing_event, "validation_mode": mode, "snapshot_cache_hit": value}
+        for value in [False, hit, hit]
+    ]
+    assert bench.snapshot_cache_status(events, mode, prepared) == {
+        "samples": 3,
+        "hits": 2 if hit else 0,
+        "first_query_hit": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "modes,hits,prepared",
+    [
+        (["snapshot", "snapshot"], [True, True], True),
+        (["snapshot", "snapshot"], [False, False], True),
+        (["snapshot", "snapshot"], [False, True], False),
+        (["strict", "snapshot"], [False, True], True),
+        ([None, None], [False, True], True),
+        (["snapshot", "snapshot"], [None, None], True),
+    ],
+)
+def test_inconsistent_snapshot_diagnostics_fail(timing_event, modes, hits, prepared):
+    events = [
+        {**timing_event, "validation_mode": mode, "snapshot_cache_hit": hit}
+        for mode, hit in zip(modes, hits)
+    ]
+    with pytest.raises(RuntimeError, match="snapshot"):
+        bench.snapshot_cache_status(events, "snapshot", prepared)
+
+
+def test_snapshot_metadata_remains_optional_only_for_old_strict_events(timing_event):
+    assert bench.snapshot_cache_status([timing_event], "strict", True) is None
+    with pytest.raises(RuntimeError, match="snapshot"):
+        bench.snapshot_cache_status([timing_event], "snapshot", True)
+
+
+def test_strict_diagnostics_reject_snapshot_events(timing_event):
+    event = {
+        **timing_event,
+        "validation_mode": "snapshot",
+        "snapshot_cache_hit": False,
+    }
+    with pytest.raises(RuntimeError, match="Strict"):
+        bench.snapshot_cache_status([event], "strict", True)
+
+
+@pytest.mark.parametrize("engine", ["ann", "exact"])
+def test_snapshot_option_is_explicit_and_only_changes_ann(engine):
+    args = SimpleNamespace(dimension=2, k=1, execution_mode="prepared")
+    strict = bench.search_workload(engine, args, [[1.0, 2.0]], "files", "index.json", 2)
+    args.validation_mode = "strict"
+    assert (
+        bench.search_workload(engine, args, [[1.0, 2.0]], "files", "index.json", 2)
+        == strict
+    )
+    args.validation_mode = "snapshot"
+    snapshot = bench.search_workload(
+        engine, args, [[1.0, 2.0]], "files", "index.json", 2
+    )
+    assert snapshot[1:] == strict[1:]
+    if engine == "ann":
+        assert "validation_mode := 'snapshot'" in snapshot[0][0]
+        assert snapshot[0] != strict[0]
+    else:
+        assert snapshot == strict
+
+
+@pytest.mark.parametrize(
     "field,message",
     [
         ("phases", "phases must be an object"),
