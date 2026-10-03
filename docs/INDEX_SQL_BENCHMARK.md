@@ -203,7 +203,7 @@ no ASAN work is included.
 
 ### Committed-Source Repeat, 2026-10-03
 
-The companion integration now pins Vortex
+The measured companion integration pinned Vortex
 `b7e903342be08984f55976420a6441e8da41b515`, based on merged #15
 `dd15b32254ca9649ee1fd1925aadc9fd53b8bfc6`, in both tracked adapters. The default
 release SQL archive was rebuilt through the tracked Vane Cargo manifest and
@@ -215,6 +215,13 @@ Native SPFresh remains pinned at
 Rust is 1.97.1; these local shell measurements use the qualified DuckDB v1.5.0
 SDK (`d8a9d61d59`), not a production wheel or the Vane release runtime. Only the
 Rust archive and output path were replaced in the preserved SDK link arguments.
+
+After Vortex #16 merged, the current adapters and release/CI assertions pin its
+formal commit `c6f7e497f99205937a6f4e73b4ab9ac3b74593b3`. The merged and measured
+commits have the identical Git tree
+`c2ee9a4d8ff62dc1f10f3e00120026399fbbba5f`. Both locked adapter builds and pin
+contracts are revalidated for that formal revision; these measurements retain
+their actual source/binary hashes rather than being relabeled as a new run.
 
 Both original sealed generations and the first 1,000 official queries were
 reused, with k=10, max_check=32,768, 128 posting pages and internal_results=64/512.
