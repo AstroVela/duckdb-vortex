@@ -61,7 +61,9 @@ jobs:
           python -I test/vane/test_vane_dynamic_wheel.py
           python -I test/vane/test_vane_runtime_identity.py
           python -I -m pytest -q test/vane/test_vane_dynamic_signing.py test/vane/test_vane_production_release.py
-          python -I -m pytest -q test/vane/test_index_sql_benchmark.py
+          python -I -m pytest -q \
+            test/vane/test_index_sql_benchmark.py \
+            test/vane/test_index_layers_benchmark.py
 
   vane-dynamic-wheel:
     if: inputs.operation != 'testpypi-dev' && inputs.operation != 'release'
