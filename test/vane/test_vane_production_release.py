@@ -465,7 +465,8 @@ def test_fresh_package_verifies_every_runtime_and_emits_nothing_on_failure(
     verifies = [
         command
         for command in commands
-        if any(str(item).endswith("/verify_extension_wheel.py") for item in command)
+        if any(str(item).endswith("/vane_provider_build.py") for item in command)
+        and command[command.index("--operation") + 1] == "verify"
     ]
     assert len(verifies) == 5
     assert [command[command.index("--base-wheel") + 1] for command in verifies] == [
