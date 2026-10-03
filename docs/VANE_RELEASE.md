@@ -17,7 +17,7 @@ git submodule update --init --recursive
 - Vortex Rust fork: `dd15b32254ca9649ee1fd1925aadc9fd53b8bfc6` (merged Vortex #15).
 - Rust: `1.97.1`, with the committed Vane adapter Cargo.lock.
 - Extension vcpkg: `74e6536215718009aae747d86d84b78376bf9e09`.
-- Shared Vane CI tools: `3f166e4bd55ee3872447c1e3b895c9af5d6723fe`.
+- Shared Vane CI tools: `1852af617031f24feca6724f41e946887fb6df6b`.
 - Provider: `vane-extension-vortex`, CPython 3.10–3.14,
   `manylinux_2_28_x86_64`, with no other provider dependencies.
 
@@ -237,8 +237,11 @@ Vortex uses `X.Y.Z.N` public wheel versions: `X.Y.Z` is the exact
 Vane release and each provider owns its positive `release_number` in
 `vane-provider-release.toml`. The first numbered release is `0.2.0.1`;
 increment only the changed provider to `0.2.0.2`, then `.3`, and so on.
-A new Vane release starts a new numbering series. Development and release
-candidate suffixes stay attached, for example `0.2.0.1.dev612`.
+Reset the counter only when the numeric Vane `X.Y.Z` changes, for example
+from `0.2.0` to the first `0.3.0.1` provider release. Keep incrementing across
+dev, rc, final and post stages of the same `X.Y.Z`: `0.2.0.2rc1` must advance
+to `0.2.0.3`, rather than resetting to `0.2.0.1`. Stage suffixes stay attached,
+for example `0.2.0.1.dev612`.
 
 Changed artifact bytes, metadata or dependency pins require a new number.
 An existing version/tag can be retried only with identical wheel bytes, and
