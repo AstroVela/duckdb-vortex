@@ -412,10 +412,12 @@ posting-page limit 256, four replicas, max_check 4096, internal_results 64,
 one warmup and three measured rounds: 90 measured queries per mode. Measurements
 were sequential, with one DuckDB/OpenMP thread and uncontrolled OS page caches.
 
-The measured core source is now committed as
+The measured core source was committed as
 `8d5f08e5bc85663b6272fadbd81067a8028f6fd3`, containing the checksum,
-layered-benchmark and explicit-snapshot changes. Both tracked outer manifests
-and lockfiles pin this revision. Measurements used the same DuckDB v1.5.0 SDK
+layered-benchmark and explicit-snapshot changes. Vortex #15 was merged as
+`dd15b32254ca9649ee1fd1925aadc9fd53b8bfc6`; the measured and merged commits have
+the same Git tree. Both tracked outer manifests and lockfiles pin the merged
+commit. Measurements used the same DuckDB v1.5.0 SDK
 (`d8a9d61d59`) and native `5893eb61ee3b18610b6b00f1939be7dae1af8904`
 static-only patch as above. Release Rust code and the Provider example were
 rebuilt with the matched SDK through the temporary local-path manifest, not
