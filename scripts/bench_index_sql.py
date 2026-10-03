@@ -227,6 +227,12 @@ def search_workload(engine, args, queries, inventory, reference, rounds):
     mode_argument = (
         ", validation_mode := 'snapshot'" if validation_mode == "snapshot" else ""
     )
+    backend_options = getattr(args, "backend_options", None)
+    options_argument = (
+        f", backend_options := {quote(json.dumps(backend_options, allow_nan=False))}"
+        if backend_options is not None
+        else ""
+    )
 
     def select(vector):
         vector = f"{vector}::FLOAT[{args.dimension}]"
@@ -239,7 +245,7 @@ def search_workload(engine, args, queries, inventory, reference, rounds):
         return (
             'SELECT "row".id AS id, "row".label AS label, '
             '"row".embedding AS embedding, distance '
-            f"FROM vortex_index_search({quote(reference)}, {vector}::FLOAT[], {args.k}{mode_argument}) "
+            f"FROM vortex_index_search({quote(reference)}, {vector}::FLOAT[], {args.k}{mode_argument}{options_argument}) "
             "ORDER BY rank;"
         )
 

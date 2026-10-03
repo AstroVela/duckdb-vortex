@@ -684,7 +684,7 @@ def main(argv=None):
             "provider_clock": "Instant around public VectorIndex::search; validation, FFI and hit mapping included",
             "sql_clock": "DuckDB materialized SELECT JSON profile, as in the source benchmark",
             "validation": "Frozen fixture content verified before/after; native/Provider open once; SQL uses the explicitly recorded validation mode",
-            "workspace": "cpp-reset and production bridge clear at call boundaries; cpp-reuse retains workspace on one thread/handle, experimental only",
+            "workspace": "cpp-reset clears at call boundaries; cpp-reuse is a direct single-handle/thread lower bound without bridge lifecycle/option guards; bridge/provider/SQL behavior depends on the recorded binaries",
             "qps": "Serial inverse mean query latency, not concurrent throughput",
             "cache": "OS page cache uncontrolled; fresh processes, not cold-disk measurements",
             "order": "cpp-reset, cpp-reuse, bridge, provider, sql-exact, sql-ann, separate diagnostics; sequential",

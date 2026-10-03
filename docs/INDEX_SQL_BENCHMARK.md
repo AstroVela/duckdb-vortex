@@ -16,6 +16,752 @@ one complete warmup round and three measured rounds, with one DuckDB thread.
 uses a matching shell without built-in Vortex, with automatic installation and
 loading disabled. Each output directory must be new.
 
+## Same-Input SIFT Comparison
+
+`scripts/bench_index_sift.py` compares native C++, the native bridge, the Rust
+Provider, and prepared strict/snapshot SQL on the exact complete SIFT100K or
+SIFT1M inputs already recorded by an OpenData benchmark. This companion needs
+NumPy, a qualified native `spfresh_benchmark`, a qualified `bench_provider`, and
+Vortex's native-only `bench_sift_fixture` example. It verifies file sizes and
+SHA-256 values in the supplied input manifest before conversion and again after
+measurement. The manifest is a list of dataset entries with `name`, `rows`,
+`dimension`, and `files.base/queries/groundtruth` identities, each containing
+absolute `path`, `bytes`, and `sha256`.
+
+```bash
+uv run --no-project --with numpy python scripts/bench_index_sift.py \
+  --dataset sift100k \
+  --input-manifest /absolute/path/opendata-groundtruth-check.json \
+  --duckdb /absolute/path/duckdb \
+  --native /absolute/path/spfresh_benchmark \
+  --provider /absolute/path/bench_provider \
+  --fixture-builder /absolute/path/bench_sift_fixture \
+  --queries 1000 --strict-queries 16 --warmup-rounds 1 --rounds 1 \
+  --output-dir build/index-sift100k
+```
+
+Use `--fixture /absolute/path/existing-fixture` to reuse an already sealed fixture
+whose input identities match. IDs and embeddings retain their original fvecs
+order. Recall@10 uses the supplied original ground truth, not agreement among
+ANN layers. Query qualification checks Float32 casts; every returned distance
+is checked against its original base row, and SQL must return the exact original
+embedding. Ranked IDs/distances must agree across layers and warmup/repeat rounds.
+
+The first tested `internal_results` among `--probes 64 128 256 512` reaching
+`--recall-target 0.99` is frozen across layers with `--max-check 32768` and the
+fixture's posting-page limit. Tuning uses the same benchmark queries, not a
+held-out quality evaluation. Failure to reach the target is an error, not a
+lower-quality timing presented as an equal-quality comparison. The native and
+Provider tools retain their 256-query cap, so 1,000 queries run in four sequential
+processes, each with full warmup and separate open/close times. SQL uses one
+prepared owner per mode. `cpp-reuse` is a direct same-handle/thread lower bound
+without bridge lifecycle/option guards. Current bridge builds retain one workspace
+pair per handle and lend it to the calling thread only during serialized searches;
+parameter changes and search errors discard it. Interpret older reset-based
+bridge reports using their recorded binary hashes, not current source behavior.
+
+Strict SQL verifies files on every call. `--strict-queries 16` uses evenly spaced
+query IDs and reports their matched subsets separately across all other layers;
+do not compare 16-sample tail percentiles to the full 1,000-query distribution.
+Diagnostics run in separate processes and verify actual provider/snapshot cache
+hits or misses. `progress.json` preserves completed layers if a later step fails.
+
+SIFT1M's raw vector input needs 488.28 MiB, above the production builder's
+256 MiB default; the fixture tool alone opts into a 512 MiB input budget. Its
+index also exceeds SQL's default 256 MiB retained-artifact budget. The driver
+checks that default snapshot SQL rejects this case and measures default strict
+SQL without retained handles. It must not silently fall back to a snapshot.
+To additionally measure warm snapshots with a **separately compiled,
+benchmark-only** shell, explicitly provide both:
+
+```bash
+--snapshot-duckdb /absolute/path/benchmark-only-cache1g/duckdb \
+--snapshot-cache-budget-mib 1024
+```
+
+The declared budget must match the compiled artifact. These flags do not change
+runtime budgets or production defaults. The candidate's binary hash is recorded
+and its cache hits are verified. Without a candidate, an oversized default
+snapshot is reported as unsupported, with no invented timing. OS page caches
+are not dropped; SPFresh's limits are not equivalent to OpenData's 1 GiB SlateDB
+cache. Serial QPS is inverse mean search/profile latency, not concurrent or
+whole-client throughput. Retain the input manifest, fixture/build metadata,
+binary hashes, raw samples, profiles, diagnostics and resource logs together.
+
+### Local SIFT Results, 2026-10-02
+
+On the same Xeon E5-2686 v4 host, both full corpora completed with the original
+first 1,000 queries, k=10, one warmup round and one measured round. SPFresh's
+measured Recall@10 was 99.77% for SIFT100K and 99.40% for SIFT1M. Every measured
+layer returned identical ranked IDs/distances, and SQL returned original rows.
+This is an initial comparison, not a multi-run stability claim.
+
+| Path | SIFT100K p50 / p99 ms | SIFT1M p50 / p99 ms |
+| --- | ---: | ---: |
+| Native C++, workspace reset | 14.95 / 16.96 | 37.58 / 44.88 |
+| Native C++, experimental workspace reuse | 2.49 / 2.96 | 10.35 / 13.61 |
+| Native bridge | 15.10 / 16.51 | 37.54 / 44.75 |
+| Rust Provider | 15.12 / 16.66 | 33.72 / 40.75 |
+| Prepared snapshot SQL | 19.23 / 21.82 | 28.43 / 35.03 |
+
+The SIFT1M snapshot row uses the separately compiled **benchmark-only 1 GiB
+retained-artifact budget**. Default snapshot SQL correctly rejects its
+509.94 MiB index; the production builder's 256 MiB raw-input default also remains
+unchanged. SIFT100K fits default budgets. Build configurations were 4,096 heads /
+4 replicas and 16,384 heads / 1 replica, respectively. Both use 128 posting pages
+and max_check=32,768; internal_results=64 and 512 reached the recall target.
+The initial SIFT1M tuning points at 64/128/256 returned only 87.52%/94.35%/98.14%
+recall; these are not the performance points reported above.
+
+Default strict SQL, on the 16 evenly spaced control queries, had p50 719.22 ms
+and 5,374.42 ms, respectively. The 1M diagnostic had no provider cache hits:
+after the first query, median source validation was 2,316 ms and provider open
+was 2,968 ms. The snapshot diagnostic had 15/15 later provider/snapshot hits.
+Its 1M native-search phase was about 26 ms, below the independent Provider
+process's median. Different executable environments, allocation history and
+timing boundaries can affect these processes; do not subtract them to claim a negative
+SQL overhead or attribute the difference to a particular allocator without
+a controlled follow-up. The same-binary C++ reset/reuse contrast is the clearer
+evidence for prioritizing workspace lifecycle optimization.
+
+The previous OpenData native Rust/SlateDB runs on these exact input hashes
+reached 99.59% and 99.10% recall with warm p50 8.60 ms and 14.28 ms. Those used
+a 1 GiB SlateDB cache and different storage/runtime and warmup behavior, not
+SPFresh's budgets; they are quality-qualified reference points, not identical
+execution conditions or a unified engine ranking.
+
+Local raw reports are `build/index-sift100k-final-20261002/summary.json` and
+`build/index-sift1m-final-20261002/summary.json`, with corresponding resource
+directories. The initial 1M run retains the full tuning curve and build logs in
+`build/index-sift1m-20261002`; the final run reuses that exact sealed fixture and
+reconfirms the selected 512-candidate point. The experimental shell's source
+delta, link argv and hashes are retained in
+`build/index-sql-sift-cache1g-20261002`. The earlier OpenData report is
+`/home/kaka/opendata/bench-runs/sift-baseline-20261002/summary.md` on this host.
+
+### Handle-Owned Workspace Results
+
+The subsequent local candidate retains one SPANN/BKT workspace pair per native
+handle, lends it to the calling thread for a serialized synchronous search, and
+detaches it from TLS on return. Capacity-option changes and failures after
+borrowing discard the pair. Closing on another thread releases it; no pointer-keyed
+global cache or per-worker copies remain. Index format, page-limit constraints,
+search budgets, source/reference validation and production defaults are unchanged.
+
+The exact same sealed SIFT generations and 1,000 queries were repeated with
+one full warmup and **three measured rounds**, 3,000 samples per full-data layer.
+This is repeated execution within each worker, not three independent SQL process
+restarts. The original initial reports above used one measured round. Recall
+remains 99.77% / 99.40%; all ranked IDs/distances, original SQL rows and repeat
+results agree, and source/fixture hashes remain unchanged.
+
+| Path | SIFT100K p50 / p99 ms | SIFT1M p50 / p99 ms |
+| --- | ---: | ---: |
+| Native C++, workspace reset control | 14.95 / 16.87 | 38.96 / 48.76 |
+| Native C++, direct workspace reuse | 2.52 / 2.97 | 11.48 / 15.38 |
+| Native bridge, handle-owned reuse | 2.51 / 2.94 | 11.51 / 15.20 |
+| Rust Provider, handle-owned reuse | 2.45 / 2.91 | 11.01 / 14.49 |
+| Prepared snapshot SQL | 6.49 / 7.21 | 14.70 / 17.92 |
+
+Compared with the original initial reports, Provider p50 decreased from
+15.12 to 2.45 ms and 33.72 to 11.01 ms; snapshot SQL decreased from 19.23 to
+6.49 ms and 28.43 to 14.70 ms. The same-binary reset/bridge contrast is the
+controlled workspace comparison. Independent executable medians should not be
+subtracted to infer wrapper overhead. Provider's three round medians were
+2.447/2.454/2.455 ms and 11.080/10.979/10.986 ms; snapshot SQL's were
+6.504/6.484/6.487 ms and 14.636/14.679/14.803 ms.
+
+The 1M snapshot still uses a **benchmark-only 1 GiB retained-artifact budget**.
+Default snapshot again rejects its 509.94 MiB index. Default strict SQL on the
+16 evenly spaced controls, 48 measured samples, remains 716.32 ms / 5,379.55 ms.
+Its 1M diagnostic has zero provider hits, with median source validation 2,341 ms
+and provider open 2,997 ms. Snapshot diagnostics observe 15/15 later hits in
+both caches, with 1M native search 11.13 ms, original-row take 1.02 ms and
+result materialization 0.63 ms. First verification/open costs are not removed.
+
+Retention trades memory for latency. Provider peak RSS increased from about
+44 to 52 MiB on 100K and 93 to 164 MiB on 1M. Current snapshot SQL peaks are
+140/390 MiB; strict SQL peaks are 138/484 MiB. The older runs used fewer rounds,
+and allocator history differs, so these peaks do not isolate an exact workspace
+memory delta. Posting-buffer budgets are not whole-process or total-handle RSS
+budgets. The same current native binary peaks at 77 MiB in reset mode versus
+148 MiB in handle-owned bridge mode on 1M.
+
+Against the earlier OpenData quality-qualified reference, Provider is now faster
+on both datasets. Snapshot SQL is faster on 100K (6.49 vs 8.60 ms), while 1M
+is close but slightly slower (14.70 vs 14.28 ms). This is not a controlled
+algorithm ranking: SlateDB cache/runtime, warmup and timing boundaries differ.
+
+Raw reports are `build/index-sift100k-workspace-20261002/summary.json` and
+`build/index-sift1m-workspace-20261002/summary.json`. Candidate binary archives,
+link commands and provenance are under `build/index-workspace-sql-20261002`;
+native qualification, new Provider and the preserved old Provider are under
+`build/index-workspace-native-20261002`. These are local source qualifications,
+not a dependency-revision bump in the outer extension. Native lifecycle tests,
+locked all-feature Rust tests, all-target Clippy and Python benchmark tests pass;
+no ASAN work is included.
+
+### Committed-Source Repeat, 2026-10-03
+
+The companion integration now pins Vortex
+`b7e903342be08984f55976420a6441e8da41b515`, based on merged #15
+`dd15b32254ca9649ee1fd1925aadc9fd53b8bfc6`, in both tracked adapters. The default
+release SQL archive was rebuilt through the tracked Vane Cargo manifest and
+lock, without a local source override. Provider/fixture executables compile the
+example sources from that same Git checkout through a run-local harness whose
+Vortex revisions and registry package versions/checksums match the adapter lock.
+Native SPFresh remains pinned at
+`5893eb61ee3b18610b6b00f1939be7dae1af8904` with the unchanged static-only patch.
+Rust is 1.97.1; these local shell measurements use the qualified DuckDB v1.5.0
+SDK (`d8a9d61d59`), not a production wheel or the Vane release runtime. Only the
+Rust archive and output path were replaced in the preserved SDK link arguments.
+
+Both original sealed generations and the first 1,000 official queries were
+reused, with k=10, max_check=32,768, 128 posting pages and internal_results=64/512.
+Each full-data path has one warmup plus three measured rounds, 3,000 measured
+samples. Native/Provider still use four sequential capped workers; SQL keeps one
+prepared owner. SQL timings remain profiler-enabled materialized-query latency,
+not the unprofiled C API timing boundary of the full-record comparison below.
+
+For this repeat, the entire driver and all sequential child workers share one
+temporary systemd cgroup: CPU affinity 8, CPUQuota=100%, MemoryMax=2 GiB and
+MemorySwapMax=0, with OMP_NUM_THREADS=1. This includes the driver's input mapping
+and validation memory; it is not the per-engine phase-accounting method below.
+The host remains shared and OS caches are not evicted. No competing builds or
+benchmarks from this qualification ran during measurement.
+
+| Path | SIFT100K p50 / p99 ms | SIFT1M p50 / p99 ms |
+| --- | ---: | ---: |
+| Native C++, workspace reset control | 15.25 / 17.06 | 40.91 / 48.92 |
+| Native C++, direct workspace reuse | 2.45 / 2.86 | 10.98 / 14.69 |
+| Native bridge, handle-owned reuse | 2.45 / 2.86 | 10.81 / 14.60 |
+| Rust Provider, handle-owned reuse | 2.49 / 2.89 | 11.41 / 15.18 |
+| Prepared snapshot SQL | 6.85 / 7.53 | 20.45 / 34.23 |
+
+Recall@10 remains 99.77% / 99.40%. Ranked IDs and Float32 distances agree across
+all layers and warmup/measured repeats; all returned SQL embeddings match their
+original base rows. Input and fixture identities are unchanged, and report
+binary hashes match the preserved executables.
+
+The SIFT1M snapshot row still requires a separately compiled **benchmark-only
+1 GiB retained-artifact budget**. Its core copy differs from the pinned commit
+only in that one budget constant. The production 256 MiB default correctly
+rejects the 509.94 MiB index; neither production cache budgets nor the builder's
+raw-input default change. Snapshot diagnostics observe one initial miss followed
+by 15/15 provider and snapshot hits on both corpora. Strict diagnostics have no
+snapshot hits; the 1M provider also has no hits under the default artifact budget.
+
+Default strict SQL uses only four evenly spaced controls (IDs 0, 333, 666, 999),
+12 measured samples, with p50 716.40 / 6,074.53 ms. These controls are not the
+full-query tail distribution and remain slow because repeated validation and,
+for 1M, provider reopen are not bypassed. First snapshot queries take
+1,923.88 / 6,008.77 ms; warm timings do not remove verification/open costs.
+
+Provider round medians are 2.497/2.487/2.487 ms and
+11.432/11.336/11.482 ms. Snapshot SQL round medians are
+6.845/6.860/6.853 ms and 18.139/20.743/23.200 ms. During the 1M snapshot worker,
+the host's one-minute load average rises from 4.84 to 13.19. Preserve this timing
+variation rather than presenting the earlier 14.70 ms local median as a stable
+guarantee. The same-binary reset/reuse contrast still demonstrates the workspace
+benefit; independent executable medians are not an isolated wrapper-cost
+measurement or a new controlled OpenData ranking.
+
+Raw samples, profiles, diagnostics and worker resource logs are retained at
+`build/committed-sift100k-20261003/summary.json` and
+`build/committed-sift1m-20261003/summary.json`.
+`build/COMMITTED_SIFT_PROVENANCE.md` records the exact source, build and cgroup
+qualification; preserved archives and structured link commands are under
+`build/committed-default` and `build/committed-cache1g`. Historical reports above
+remain separate. This follow-up adds no ASAN work, posting-reader redesign or
+paid-service calls.
+
+#### Low-Load Recheck, 2026-10-03
+
+After the host became quieter, both corpora were rerun sequentially without
+rebuilding binaries, changing the sealed fixtures or retuning. Binary/script
+hashes, input/reference identities, build metadata and all benchmark parameters
+are identical to the committed-source repeat above, including the whole-driver
+single-core/2 GiB cgroup. Each full-data layer again has 3,000 measured samples
+after one full warmup. The initial host load average is 0.55, with approximately
+99% idle CPU in the pre-run samples; the host is still not exclusively reserved.
+
+| Path | SIFT100K p50 / p99 ms | SIFT1M p50 / p99 ms |
+| --- | ---: | ---: |
+| Native C++, workspace reset control | 15.35 / 17.33 | 37.65 / 45.57 |
+| Native C++, direct workspace reuse | 2.48 / 2.97 | 10.07 / 13.32 |
+| Native bridge, handle-owned reuse | 2.48 / 2.94 | 10.11 / 13.40 |
+| Rust Provider, handle-owned reuse | 2.47 / 2.91 | 10.09 / 13.56 |
+| Prepared snapshot SQL | 6.66 / 7.52 | 15.06 / 18.73 |
+
+Recall@10 is unchanged at 99.77% / 99.40%, with identical ranked IDs/distances
+across layers and repeats and exact original SQL embeddings. Snapshot SQL round
+medians are 6.664/6.648/6.669 ms and 15.052/15.066/15.054 ms; Provider round
+medians are 2.469/2.468/2.472 ms and 10.065/10.085/10.112 ms. During the snapshot
+workers, one-minute host load averages are 1.06 to 1.30 on 100K and 1.25 to 1.46
+on 1M. The 1M snapshot median is 26.4% lower than the preceding 20.45 ms run,
+and its p99 decreases from 34.23 to 18.73 ms. This same-artifact recheck supports
+environmental interference as a contributor to the earlier timing variation;
+it is not a new code optimization or a guarantee on other hosts.
+
+Default strict SQL remains slow: p50 is 708.05 / 5,364.03 ms on the four control
+queries, 12 measured samples, with 1M round medians
+5,365.46/6,092.71/5,351.78 ms. Its validation/reopen work still varies even on
+the quieter host. Snapshot diagnostics again confirm 15/15 later provider and
+snapshot hits. The default 256 MiB budget still rejects SIFT1M; its snapshot row
+uses the same explicit **benchmark-only 1 GiB** shell, not a changed production
+default. First snapshot queries still cost 1,903.17 / 5,257.86 ms.
+
+Both previous reports are retained, not overwritten or excluded. The new full
+reports and raw samples are
+`build/committed-sift100k-idle-20261003-234042/summary.json` and
+`build/committed-sift1m-idle-20261003-234042/summary.json`.
+
+### Full-Record API Comparison
+
+`scripts/bench_index_sift_end_to_end.py` compares prepared DuckDB through its
+C API with OpenData's `sift_repeat` entry point. Both return the top-10 original
+IDs, squared L2 distances and complete Float32[128] embeddings. The SQL
+projection omits the fixture-only `label`; OpenData uses its standard full-record
+search path. This is closer to equivalent application work than comparing the
+ID/distance-only Provider directly against OpenData's record-returning API.
+
+Each worker keeps one database/connection open for a complete warmup and three
+measured query-set rounds. DuckDB also keeps one prepared handle. Query value
+construction/binding happens before each timer; timing ends when the full
+caller-owned records are available. C API chunk extraction and embedding copies
+are included. Neither engine enables a query profiler. Output serialization,
+validation, open/prepare/close and rate-limit scheduling are excluded; there is
+no query producer/QPS limiter in this workload. Raw records are validated against
+the original fvecs, squared L2 distances and original ground truth, including
+warmup. Each engine's ranked results must agree across repeats; only the SQL
+results must agree with SPFresh Provider parity. Cross-engine ANN rankings need
+not be identical.
+
+The C API executable is compiled against the qualified DuckDB headers and linked
+with the exact libraries/extension archive from a recorded shell link command,
+replacing only shell object files. It does not rebuild or change the extension.
+`build-capi` records the compile/link argv, source/archive/binary hashes and
+declared compiled artifact budget; the budget flag is provenance, not a runtime
+setting. For example:
+
+```bash
+uv run --with numpy python scripts/bench_index_sift_end_to_end.py build-capi \
+  --link-manifest /absolute/path/to/qualified-shell/link-command.json \
+  --sdk-root /absolute/path/to/matching-duckdb-build \
+  --duckdb-include /absolute/path/to/matching-duckdb/src/include \
+  --output-dir build/sift-capi-default --artifact-budget-mib 256
+
+uv run --with numpy python scripts/bench_index_sift_end_to_end.py run \
+  --dataset sift100k \
+  --input-manifest /absolute/path/to/groundtruth-check.json \
+  --fixture /absolute/path/to/sealed-sift100k-fixture \
+  --capi build/sift-capi-default/bench_index_sift_capi \
+  --opendata /absolute/path/to/sift_repeat \
+  --opendata-root /absolute/path/to/opendata \
+  --opendata-config /absolute/path/to/original-sift100k-bench.toml \
+  --parity-samples /absolute/path/to/qualified-provider/samples.json \
+  --probes 64 --warmup-rounds 1 --rounds 3 \
+  --output-dir build/sift100k-full-record-api
+```
+
+The optional OpenData comparison requires a benchmark-instrumented checkout
+providing `sift_repeat` and its full-record, phase-barrier and cache-counter
+protocols. The local reports below used that additional benchmark harness,
+not an unmodified upstream CLI. This PR does not provide or modify OpenData's
+engine; retain the recorded harness source and binary hashes when reproducing
+the comparison.
+
+Build that OpenData entry point with
+`cargo build --locked --release -p vector-bench --bin sift_repeat`. The driver
+uses the original storage path plus the normal bencher's `/0` suffix, the original
+query/ground-truth paths and unchanged nprobe. Omitted nprobe remains omitted in
+the generated config; the effective value comes from the running engine, not a
+duplicated default in Python. There is no ingest or index tuning. Each output
+directory must be new. A partial report is retained with failed status on errors.
+
+For SIFT1M, use the original `nprobe256.toml`, `--probes 512` and a separately
+linked **benchmark-only 1 GiB** C API binary. The default 256 MiB artifact budget
+cannot retain that index. This comparison is explicit snapshot mode, not default
+strict SQL performance. OpenData retains its 1 GiB SlateDB block cache; the two
+budgets constrain different objects and are not equal RSS limits.
+
+One caller is not one CPU: OpenData uses Rayon/Tokio=4, whereas DuckDB uses
+threads=1 and SPFresh OMP=1. The driver records GNU time user/system CPU, CPU
+percentage, peak RSS, wall time, load averages, binary hashes and actual settings.
+OS caches are not evicted and the host is not CPU-isolated. OpenData's existing
+store is opened writable and may compact; the Vortex generation remains sealed.
+Serial inverse-mean API latency is not client/serialization throughput.
+
+`--opendata-maintenance off` is an explicit query-only control. It writes a
+run-local SlateDB settings file disabling the embedded compactor and GC. It does
+not change the original config, index parameters, query contents or cache budget.
+The default remains `default`, preserving the original maintenance behavior.
+
+#### Local Full-Record Results, 2026-10-02
+
+Both full corpora use the original first 1,000 queries, k=10, one complete warmup
+and three measured rounds in each worker (3,000 measured calls). Input and sealed
+generation hashes are unchanged. Every warmup/measured embedding and distance
+was verified against the original base rows, every engine's repeats agree, and
+SQL matches the existing Provider parity. No search algorithm was changed.
+
+| Workload | SQL snapshot C API p50 / p99 ms | OpenData API p50 / p99 ms | SQL / OpenData Recall@10 |
+| --- | ---: | ---: | ---: |
+| SIFT100K, original maintenance | 7.46 / 10.83 | 8.26 / 9.73 | 99.77% / 99.59% |
+| SIFT1M, original maintenance | 14.64 / 21.78 | 17.79 / 20.88 | 99.40% / 99.10% |
+| SIFT1M, maintenance-off control | 15.03 / 19.02 | 17.61 / 20.78 | 99.40% / 99.10% |
+
+The original-maintenance 1M run logged four nonfatal SlateDB GC object-store
+errors. Searches, close and correctness validation succeeded, but that run is
+not a clean-background baseline. The explicit maintenance-off repeat had no
+logged errors and preserved 9,521 centroids, recall and ranked-result parity.
+OpenData p50 changed only from 17.79 to 17.61 ms; this does not support attributing
+the main latency difference to GC. SQL was rerun too, rather than mixing a new
+OpenData result with the old SQL timing. This is a query-only control, not a fix
+for the underlying GC errors.
+
+The SQL/OpenData three-round p50s on 100K were
+7.447/7.482/7.468 ms and 8.295/8.298/8.178 ms. On the clean-background 1M control
+they were 15.576/15.009/14.516 ms and 17.652/17.744/17.276 ms. The host remains
+non-isolated, and SQL's round medians show drift; these are local repeat results,
+not a universal engine ranking. SQL's median was lower in both comparisons,
+but its 100K tail was worse. The different profiler-based results and earlier
+single-round OpenData workload are retained above, not silently replaced or
+treated as proof of an OpenData performance regression.
+
+Peak worker RSS was SQL/OpenData 138/149 MiB on 100K and 387/946 MiB on the
+maintenance-off 1M control. GNU time CPU percentages were 99%/306% and 99%/318%
+over their respective whole runs, including untimed output and startup. These
+are not isolated query CPU costs. The block-cache and retained-artifact budgets
+limit different objects; neither is a total process memory limit.
+
+These are **warm explicit snapshots**, not strict default SQL measurements.
+100K uses the default 256 MiB artifact budget; 1M still needs the benchmark-only
+1 GiB archive. Production defaults remain unchanged. First search was about
+2.04 s on SQL versus 28.6 ms on OpenData for 100K; on the maintenance-off 1M
+control it was 6.08 s versus 46.3 ms. OpenData additionally spent 0.24/2.25 s
+opening its database; SQL's separate prepare cost was below 1 ms. Warm latency
+does not eliminate the initial verification/open cost.
+
+Raw paired reports are `build/index-sift100k-e2e-20261002/summary.json`,
+`build/index-sift1m-e2e-20261002/summary.json`, and
+`build/index-sift1m-e2e-no-maintenance-20261002/summary.json`. Each contains the
+effective settings, binary/source identities, worker command lines and timings;
+their directories retain full-record samples and GNU time/resource logs. The C API build manifests live
+in `build/index-e2e-capi-20261002-default` and
+`build/index-e2e-capi-20261002-cache1g`. OpenData's local run overview is
+`/home/kaka/opendata/bench-runs/sift-e2e-20261002/summary.md`.
+
+Local qualification passed 169 Python tests, including seven compiled C API
+protocol cases, all seven Rust benchmark library tests (three new repeat tests) and all-target/all-feature
+Clippy for `vector-bench`. CI now includes the pure benchmark parser/validation
+tests; compiled protocol cases require `VORTEX_SIFT_CAPI` and skip without that
+artifact. Workflow YAML parsing and duplicate-key/indentation/whitespace checks
+pass. Applying Vortex's stricter YAML style config to this separate repository
+reports existing empty-value/comment-spacing issues on both HEAD and the
+modified workflow; these unrelated formatting issues were not changed.
+Remote CI and ASAN were not run.
+
+#### Resource-Controlled Comparison
+
+Equal configured cache sizes do not imply equal caching mechanisms or total
+memory. The constrained mode instead aligns the allowed resources and requires
+close Recall@10 before accepting a paired result:
+
+- `--cpu 8 --memory-mib 2048` launches sequential systemd user services with
+  affinity to logical CPU 8, `CPUQuota=100%`, `MemoryMax=2 GiB` and swap disabled.
+  A working Linux cgroup-v2/systemd user delegation is required. Each untimed
+  phase validates the live affinity, quota, memory/swap limits and OOM counters;
+  recording requested settings alone is not considered verification.
+- OpenData Rayon/Tokio workers are 1; DuckDB threads and SPFresh OMP are 1.
+  IO/blocking helper threads are not removed. One CPU budget is not a promise
+  that the process has only one OS thread.
+- Both APIs return ID, squared-L2 distance and the complete original embedding.
+  The original first 1,000 queries, k=10, one full warmup and three measured
+  rounds are unchanged. Every returned record and repeat is validated; SQL
+  also retains Provider parity. Index construction and ingestion are excluded.
+- Recall must be at least 99%, with an absolute gap no larger than 0.002
+  (0.2 percentage points). `--opendata-nprobe` explicitly calibrates quality
+  without editing the original config. Diagnostics freeze the main worker's
+  effective value, including when the config omitted `nprobe`.
+- Main workers disable the metrics recorder and SQL timing trace. Separate
+  one-warmup/one-measured workers collect existing SlateDB counters and SQL
+  handle/source cache hits under the same constraints. Diagnostic timings are
+  retained but are not headline latencies.
+
+For example, reuse the qualified 100K inputs, fixture and libraries:
+
+```bash
+uv run --no-project --with numpy python scripts/bench_index_sift_end_to_end.py run \
+  --dataset sift100k \
+  --input-manifest /home/kaka/opendata/bench-runs/sift-baseline-20261002/groundtruth-check.json \
+  --fixture build/index-sift100k-20261002/fixture \
+  --capi build/index-resource-capi-20261002-default/bench_index_sift_capi \
+  --opendata /home/kaka/opendata/target/bench-release/release/sift_repeat \
+  --opendata-root /home/kaka/opendata \
+  --opendata-config /home/kaka/opendata/bench-runs/sift-baseline-20261002/sift100k/bench.toml \
+  --parity-samples build/index-sift100k-workspace-20261002/provider/samples.json \
+  --probes 64 --cpu 8 --memory-mib 2048 --opendata-maintenance off \
+  --output-dir build/new-sift100k-resource-run
+```
+
+For 1M, use the matching 1M fixture/parity and benchmark-only 1 GiB C API
+artifact, `nprobe256.toml`, `--probes 512 --opendata-nprobe 320`, and the opposite
+order `--order opendata sql-snapshot-capi`. Output directories must be new.
+The production 256 MiB artifact limit is not changed.
+
+OpenData uses private copies of the original local SlateDB store, made inside
+each worker cgroup with distinct inodes, so newly populated file cache is charged
+there rather than inherited from the original store. Staging is outside API
+latencies but included in whole-run time and cgroup memory peak. The original
+store is not ingested into or modified. Vortex uses the original sealed
+generation. Maintenance is explicitly off for this query-only control, not fixed.
+
+`MemoryMax` limits memory charged to the unit, not all host memory: shared cache
+already charged to another cgroup is not globally reassigned, and Vortex's
+original files are not cloned. No global OS-cache eviction or CPU isolation is
+performed. Record process RSS and cgroup peak separately; the latter includes
+charged file cache, staging and output. A nonzero `memory.events.max` indicates
+limit pressure/reclaim, not an OOM; OOM counters disqualify the run.
+
+Phase reports distinguish logical read bytes (`/proc/PID/io` `rchar`) from
+kernel-accounted storage reads (`read_bytes`), and include minor/major faults and
+CPU time. Measured-round deltas include untimed binding, validation and sample
+output; the isolated first-search delta covers only that API call. Do not divide
+round CPU time by query count and present it as pure search CPU.
+
+SlateDB `db_cache.access_count` keeps hit/miss and entry-kind labels. Its fetch
+hits include requests sharing an in-flight load. SQL provider/snapshot hits
+mean retained handles/source buffers, not posting-block or OS-cache hits. These
+are different metrics and must not be combined into a common cache-hit rate.
+This is a more controlled warm resource/quality comparison, not identical cache
+implementations or strict-default SQL performance.
+
+#### Local Resource-Controlled Results, 2026-10-02
+
+Both final reports pass resource, quality, full-record and repeat checks, with no
+logged errors or OOMs. Main workers have recorder/tracing disabled. Each result
+contains 3,000 measured calls after one complete 1,000-query warmup, with the
+same 2 GiB/one-logical-CPU limits. OpenData maintenance is off in both datasets.
+
+| Workload | SQL snapshot C API p50 / p99 ms | OpenData API p50 / p99 ms | SQL / OpenData Recall@10 | OpenData nprobe |
+| --- | ---: | ---: | ---: | ---: |
+| SIFT100K | 5.60 / 6.61 | 11.75 / 13.76 | 99.77% / 99.59% | 100 |
+| SIFT1M | 18.23 / 29.61 | 39.20 / 51.78 | 99.40% / 99.46% | 320 |
+
+The Recall gaps are 0.18 and 0.06 percentage points. A preliminary 1M calibration
+at `nprobe=384` reached 99.65%, exceeding the allowed gap from SQL's 99.40%; it
+was rejected. The qualified `320` point was then frozen for all final rounds and
+diagnostics. Calibration uses the same first 1,000 queries, not a held-out
+quality evaluation. Preliminary instrumented/calibration runs are not mixed
+into this table. The original `nprobe256.toml` remains unchanged.
+
+SQL/OpenData round p50s are 5.523/5.641/5.648 and 11.690/11.761/11.821 ms on
+100K, and 16.316/18.563/19.312 and 38.702/39.102/39.902 ms on 1M. The 1M SQL
+rounds drift materially. The host is an E5-2686 v4 with `schedutil`, CPU 8's SMT
+sibling 26 is not isolated, and other host work remains possible. These are
+local allowed-resource results, not a universal speedup claim or proof of a
+regression against the earlier multi-worker/different-quality comparison.
+
+| Workload | SQL peak RSS / cgroup peak MiB | OpenData peak RSS / cgroup peak MiB |
+| --- | ---: | ---: |
+| SIFT100K | 139 / 281 | 173 / 362 |
+| SIFT1M | 388 / 853 | 1,029 / 2,048 |
+
+OpenData 1M recorded 4,748 `memory.events.max` pressure events over the whole
+worker, including staging; all OOM counters remain zero. Headline phase samples
+observed up to 194/257 OpenData OS threads on 100K/1M versus 4 SQL threads,
+despite both compute-worker settings and CPU budget being one. These are sampled
+thread counts, not an exhaustive peak-thread census. The 1M whole-run CPU
+percentages were SQL 98% and OpenData 99%, not per-query CPU utilization.
+
+Independent measured diagnostics report 510,636/1,208,324 SlateDB data-block
+hits with zero misses on 100K/1M; index and filter hits also have zero misses.
+SQL has an initial handle/source miss followed by 1,000/1,000 measured hits in
+each diagnostic. The different hit definitions above still apply: this confirms
+both warm paths, not equivalent cache implementations.
+
+Across the three main measured rounds, SQL logical reads are 13,133,244,738 bytes
+on 100K and 68,953,285,689 on 1M, versus OpenData's 56,547 and 449,547. Kernel
+storage reads are SQL 0/1,437,696 bytes and OpenData 0/0. All measured major-fault
+deltas are zero. Warm caches do not remove SQL's logical read/copy/syscall work;
+these counters are not themselves a CPU profile or a common cache-hit ratio.
+
+First search still costs SQL/OpenData 2,053/81 ms on 100K and 7,202/145 ms on
+1M, plus separate database open costs of 16/419 ms and 16/2,674 ms. SQL prepare
+is below 1 ms. This is not a cold-disk measurement, and warm medians do not
+eliminate first-use validation/materialization costs.
+
+Final raw reports are `build/index-sift100k-resource-final-20261002/summary.json`
+and `build/index-sift1m-resource-final-20261002/summary.json`. Each retains frozen
+driver/resource scripts, main/diagnostic full-record samples, configs, binary and
+source hashes, phase counter snapshots and GNU time logs. Build manifests are
+under `build/index-resource-capi-20261002-{default,cache1g}`. The local overview
+is `/home/kaka/opendata/bench-runs/sift-resource-20261002/summary.md`.
+
+Local qualification passed 186 Python tests (including compiled C API and live
+systemd cases), 9 Rust benchmark library tests, all-target/all-feature Clippy,
+Rustfmt, Black/Ruff and C++ clang-format. Doctest checking passed with no runnable
+cases. The pure resource/driver tests are included in CI; compiled C API and
+systemd integration cases require `VORTEX_SIFT_CAPI` and
+`VORTEX_SIFT_SYSTEMD_TESTS=1`, respectively. Workflow parsing and narrow YAML
+checks pass; the borrowed full strict YAML config still reports the same
+pre-existing comment-spacing/empty-value issues on HEAD and the working tree.
+Remote CI and ASAN were not run.
+
+#### Local Stability Repeat, 2026-10-03
+
+This local-only repeat reuses the exact input, binary, benchmark-source and
+Provider-parity hashes from the qualified 2026-10-02 resource-controlled runs.
+It changes neither search implementations nor production defaults. No paid API,
+cloud resource, download, index rebuild or ingestion is involved; the driver uses
+cached NumPy through `uv run --offline --no-project --with numpy python`.
+
+Both datasets use the same original first 1,000 queries, k=10, one complete
+warmup and five measured rounds under the existing CPU 8 / 2 GiB / no-swap
+constraints. nprobe is frozen at 100/320 and SQL probes at 64/512 for 100K/1M.
+Engine order is reversed from the previous runs: OpenData then SQL for 100K,
+SQL then OpenData for 1M. The host and its SMT sibling remain unisolated; order,
+run length and host conditions can all affect comparisons with the older runs.
+
+| Workload | SQL snapshot C API p50 / p99 ms | OpenData API p50 / p99 ms | SQL / OpenData Recall@10 |
+| --- | ---: | ---: | ---: |
+| SIFT100K | 5.59 / 10.91 | 11.90 / 23.50 | 99.77% / 99.59% |
+| SIFT1M | 16.87 / 30.34 | 39.67 / 77.80 | 99.40% / 99.46% |
+
+Each headline worker validates 60,000 full records, including warmup, and
+contains 5,000 measured calls. All repeats and SQL/Provider parity checks pass.
+Both reports are `ok`, satisfy the same Recall floor/gap checks and verify live
+resource limits for all main and diagnostic workers, with no logged errors or
+OOM events. Diagnostics remain separate from headline timing. These are warm
+explicit-snapshot SQL results, not strict-default or cold-disk latencies.
+
+SQL's 1M round p50s are 16.905/16.747/16.699/16.852/17.250 ms; the earlier
+16.316-to-19.312 ms upward trend does not recur. OpenData's 1M round p50s are
+39.427/39.778/40.276/39.675/39.255 ms. Stable medians do not imply stable tails:
+OpenData's p99 increases from 13.76 to 23.50 ms on 100K and from 51.78 to
+77.80 ms on 1M; SQL's 100K p99 also increases from 6.61 to 10.91 ms. Each
+OpenData 1M round has p99 between 77.13 and 78.18 ms. These variations are not
+evidence of a code regression or optimization, since binaries are unchanged;
+their cause has not been established by a CPU profile.
+
+Main-worker peak RSS / cgroup memory are SQL 140/290 MiB and OpenData 176/366
+MiB on 100K, and SQL 389/862 MiB and OpenData 1,074/2,048 MiB on 1M. OpenData
+1M records 3,568 memory-limit pressure events over the worker, including 14 in
+the first measured round and none in the remaining measured rounds. This is
+reclaim pressure, not OOM. Across five measured rounds SQL 1M issues
+114,922,142,815 logical read bytes with zero kernel storage reads; OpenData
+issues 805,435 logical read bytes and 4,096 kernel storage read bytes. Both
+record zero measured major faults. These are whole-round counters, not isolated
+search CPU/IO, but they do not support attributing the tail change to bulk disk
+reads. SQL's repeated logical reads/copies and OpenData's tails warrant focused
+CPU profiles before changing caching or search parameters.
+
+Independent diagnostics again show zero measured SlateDB data/index/filter
+misses, with 510,636/1,208,324 data-block hits for 100K/1M, and SQL reports
+1,000/1,000 Provider and source hits for each dataset. Their different cache
+semantics still apply; they do not establish identical cache implementations.
+
+For reproduction, add `--rounds 5 --opendata-nprobe 100` and
+`--order opendata sql-snapshot-capi` to the 100K example above, with a fresh output
+directory. For the corresponding 1M inputs/libraries, freeze nprobe 320 and use
+`--rounds 5 --order sql-snapshot-capi opendata`. Raw reports, samples and frozen
+drivers are retained under
+`build/index-sift100k-resource-repeat-20261003-reversed/summary.json` and
+`build/index-sift1m-resource-repeat-20261003-reversed/summary.json`.
+
+Verification for this repeat is the driver qualification plus independent JSON
+checks of provenance, samples, resource phases and diagnostics, and Markdown
+diff checks. Engine code and test suites are unchanged; the earlier unit tests,
+Clippy and formatting checks were not rerun. No commit, push, remote CI or ASAN
+run is included.
+
+#### Posting Read/Copy Profile, 2026-10-03
+
+This diagnostic reuses the same SIFT1M generation and qualified native, Provider
+and 1-GiB-artifact-budget SQL C API binaries. It selects the original first 256
+queries (the existing native/Provider harness limit), k=10, max_check=32768,
+internal_results=512 and search_pages=128. All layers run sequentially with one
+warmup and five measured rounds, CPU 8, one-core quota, 2 GiB memory and no swap.
+No search implementation, input, index, recall parameter or production default
+changes. SQL uses explicit snapshot validation and returns full original rows;
+native and Provider return IDs/row addresses and distances.
+
+The separate uninstrumented p50 / p99 results are 11.81 / 15.63 ms for direct
+C++ workspace reuse, 11.56 / 15.65 ms for Provider and 14.97 / 18.89 ms for SQL.
+All six baseline/profile workers return the exact previously qualified ranked
+IDs and Float32 distances; both SQL workers additionally validate 15,360 full
+records each. Recall@10 is 99.6875% on this subset. These numbers do not replace
+the preceding 1,000-query headline results or demonstrate an optimization.
+
+`perf record` samples user and kernel CPU at a fixed 5-ms period with 16-KiB
+DWARF stacks. Temporary per-binary entry/return uprobes identify all 1,536 native
+queries per worker, allowing startup, warmup and teardown to be excluded. SQL
+also checks its phase-barrier monotonic timestamps against the probes. The
+profiler runs outside the worker cgroup. No global perf permission setting is
+changed, and probes and worker units are removed after capture.
+
+| Warm CPU samples | Native | Provider | SQL snapshot |
+| --- | ---: | ---: | ---: |
+| Samples in selected window | 2,883 | 2,674 | 3,714 |
+| Posting read path, inclusive | 50.99% | 49.03% | 35.38% |
+| Kernel copy routines, self | 37.43% | 37.47% | 27.30% |
+| AVX L2 distance, self | 14.92% | 17.54% | 11.52% |
+| User-space memcpy/memmove, self | 0.03% | 0.00% | 0.48% |
+| Memset, self | 5.06% | 6.06% | 4.68% |
+
+Inclusive read samples contain the kernel-copy samples; rows must not be summed.
+The observed chain is `ExtraStaticSearcher<float>::SearchIndex` ->
+`SimpleFileIO::ReadBinary` -> `istream::read` -> `read` -> `filemap_read` ->
+`copy_page_to_iter` -> `rep_movs_alternative`. The last instruction alone accounts
+for 36.18% / 36.69% / 26.33% of native / Provider / SQL samples. The main memset
+stack is the existing BKT `WorkSpace::Reset` / visited-set clearing path.
+
+Provider stacks often stop at `SimpleFileIO` or the distance routine, so its
+outer native/head/posting inclusive percentages are incomplete and are not
+compared. Native and SQL resolve the complete posting read chain. Return probes
+replace the caller return address above SPANN, so ancestry above that frame is
+not used for attribution. SQL has one empty callchain and six unknown leaf
+samples (0.16% including that empty sample). Whole-round SQL sampling includes
+untimed binding and CSV output; approximately 2.93% is identifiable numeric
+output formatting. Percentages describe sampled CPU, not query wall latency.
+
+The uninstrumented SQL measured phases issue 29,285,178,680 logical read bytes
+and 675,680 read calls: approximately 21.82 MiB and 528 reads per query. Kernel
+storage-read bytes and major faults are both zero. The instrumented run has the
+same logical read byte/call counts. Its sampled kernel CPU share (33.12%) agrees
+with phase counters (6.15 system seconds of 18.57 total process CPU seconds).
+
+A separate `strace` check uses queries 0/85/170/255 for two identical passes.
+Excluding the posting header, it observes 4,094 reads and 4,094 `SEEK_SET` calls
+on `postings.bin`, transferring 166,117,306 bytes. Both passes repeat exactly
+the same read offsets and sizes; unique byte coverage is 75,812,830 bytes.
+Results match the uninstrumented native baseline. Trace timings are excluded
+from performance comparisons.
+
+The next focused experiment is a borrowed, read-only posting view over the
+verified private generation, with bounds/lifetime checks, existing memory
+budgets, and a fallback for formats requiring a writable decoding buffer.
+It must feed posting processing directly: implementing `ReadBinary` with mmap
+followed by memcpy would retain the full-volume copy. Replacing seek/read with
+pread only targets the much smaller seek portion (about 2-3% inclusive here).
+Strict validation defaults, reference identity and the fixed search_pages
+contract must remain unchanged. Measure an A/B on full SIFT100K/SIFT1M query
+sets and verify exact results/recall before claiming a speedup. Visited-set
+clearing is a secondary candidate after the reader experiment.
+
+Raw `perf.data`, decoded stacks, query samples, syscall traces, resource phases,
+binary/input hashes and local capture/analysis scripts are retained under
+`build/index-posting-profile-20261003/`; `cpu-summary.json`, `results.json` and
+`native-syscalls-baseline/io-summary.json` contain the structured results.
+Profile-run medians are 11.18 / 10.42 / 13.92 ms, kept separately from normal
+timing. The unisolated host and sequential order preclude interpreting their
+lower values as negative profiler overhead or an engine improvement. This
+investigation adds benchmark documentation and local diagnostic artifacts only;
+engine unit tests, Rust/C++ builds and remote CI were not rerun.
+
+## Synthetic Workload
+
 `--execution-mode ad-hoc` is the default and preserves the original workload.
 To measure repeated execution through one prepared owner per search worker, use:
 
@@ -300,7 +1046,7 @@ sequentially, with the source report's query order, warmups and measured rounds.
 | --- | --- | --- |
 | `cpp-reset` | Direct SPANN search, including QueryResult allocation/copy/destruction and both workspace resets | Native open once; options set once |
 | `cpp-reuse` | Direct SPANN search retaining workspace on one fixed handle/thread | Native open once; experimental lower bound |
-| `bridge` | Current C ABI search, including per-call options and workspace resets | Native open once |
+| `bridge` | C ABI search, including per-call options, serialization and workspace lifecycle guards | Native open once; reuse behavior depends on the recorded binary |
 | `provider` | Public `VectorIndex::search`, including validation, FFI and physical-row mapping | Verify/materialize artifacts once at open |
 | `sql-ann` | Prepared SQL, selected validation mode, Provider search, ranked original-row fetch and result consumption | Strict by default; snapshot explicitly retains fully verified source/index after the first execution |
 | `sql-exact` | Prepared exact Vortex scan returning the same original-row columns | Control, not an ANN layer |
@@ -332,8 +1078,9 @@ medians, RSS, recall and diagnostics; worker CSV/JSON contains all raw samples.
 This is a frozen-fixture lower-bound comparison, not an assertion that native
 and SQL do equal work. Native/Provider do not repeat strict SQL's full-content
 checks or fetch original rows. Their difference from SQL must not be labelled solely
-as DuckDB engine overhead. The `cpp-reuse` experiment does not enable production
-workspace reuse, whose multi-handle/thread lifetime contract remains unchanged.
+as DuckDB engine overhead. `cpp-reuse` bypasses the bridge's lifecycle and option
+guards; current bridge builds implement handle-owned reuse independently.
+The older local matrices below predate that change and still reset in the bridge.
 
 ### Local Layered Results
 
@@ -416,8 +1163,9 @@ The measured core source was committed as
 `8d5f08e5bc85663b6272fadbd81067a8028f6fd3`, containing the checksum,
 layered-benchmark and explicit-snapshot changes. Vortex #15 was merged as
 `dd15b32254ca9649ee1fd1925aadc9fd53b8bfc6`; the measured and merged commits have
-the same Git tree. Both tracked outer manifests and lockfiles pin the merged
-commit. Measurements used the same DuckDB v1.5.0 SDK
+the same Git tree. The #28 integration pinned that merged commit; the current
+workspace-reuse follow-up pins its own core commit instead. Measurements used
+the same DuckDB v1.5.0 SDK
 (`d8a9d61d59`) and native `5893eb61ee3b18610b6b00f1939be7dae1af8904`
 static-only patch as above. Release Rust code and the Provider example were
 rebuilt with the matched SDK through the temporary local-path manifest, not
@@ -452,7 +1200,9 @@ source/store validation had a median of 812.41 ms in strict mode, versus
 search was 25.78 ms, original-row take 0.92 ms and Rust result materialization
 0.73 ms. This is an explicit contract change avoiding repeated validation,
 not a faster checksum or a claim that the default now costs 30 ms. Native
-workspace lifetime rules were not changed; `cpp-reuse` remains experimental.
+workspace lifetime rules were unchanged in this earlier snapshot-only candidate;
+its bridge still reset at call boundaries. See the newer handle-owned SIFT results
+above for the separate workspace change.
 
 The snapshot process's first SQL query took 1905.04 ms, versus 2030.18 ms in
 strict mode. These single observations include complete initial verification

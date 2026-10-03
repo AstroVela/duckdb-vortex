@@ -53,7 +53,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install release validation tooling
-        run: python -m pip install --disable-pip-version-check -r vane-extension-ci-tools/requirements-release.txt pytest pyyaml
+        run: >-
+          python -m pip install --disable-pip-version-check
+          -r vane-extension-ci-tools/requirements-release.txt pytest pyyaml numpy
 
       - name: Exercise the provider release and native packaging contracts
         run: |
@@ -63,7 +65,10 @@ jobs:
           python -I -m pytest -q test/vane/test_vane_dynamic_signing.py test/vane/test_vane_production_release.py
           python -I -m pytest -q \
             test/vane/test_index_sql_benchmark.py \
-            test/vane/test_index_layers_benchmark.py
+            test/vane/test_index_layers_benchmark.py \
+            test/vane/test_index_sift_benchmark.py \
+            test/vane/test_index_sift_end_to_end.py \
+            test/vane/test_index_resources.py
 
   vane-dynamic-wheel:
     if: inputs.operation != 'testpypi-dev' && inputs.operation != 'release'
