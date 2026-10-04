@@ -23,6 +23,45 @@ def e2e(monkeypatch):
     return importlib.import_module("bench_index_sift_end_to_end")
 
 
+@pytest.mark.parametrize("archive_path", ["absolute", "relative", "relative-decoy"])
+def test_capi_build_hashes_the_archive_used_by_the_linker(
+    e2e, tmp_path, monkeypatch, archive_path
+):
+    sdk = tmp_path / "sdk"
+    archive = sdk / "lib/libvortex_duckdb.a"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"linked archive")
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    monkeypatch.chdir(caller)
+    if archive_path == "relative-decoy":
+        decoy = caller / "lib/libvortex_duckdb.a"
+        decoy.parent.mkdir()
+        decoy.write_bytes(b"unrelated archive")
+    library = str(archive if archive_path == "absolute" else archive.relative_to(sdk))
+    manifest = tmp_path / "link.json"
+    manifest.write_text(
+        json.dumps(["c++", "tools/shell/shell.o", library, "-o", "tools/shell/duckdb"])
+    )
+    commands = []
+
+    def compile_or_link(command, *, check, cwd=None):
+        assert check
+        if cwd is not None:
+            assert cwd.resolve() == sdk
+            assert (cwd / library).read_bytes() == b"linked archive"
+        Path(command[command.index("-o") + 1]).write_bytes(b"compiled output")
+        commands.append(command)
+
+    monkeypatch.setattr(e2e.subprocess, "run", compile_or_link)
+    result = e2e.build_capi(
+        manifest, Path("../sdk"), sdk / "include", tmp_path / "build", 256
+    )
+    assert len(commands) == 2
+    assert result["archive_sha256"] == e2e.bench.fingerprint(archive)
+    assert json.loads((tmp_path / "build/build.json").read_text()) == result
+
+
 def records():
     base = np.arange(20, dtype=np.float32).reshape(10, 2)
     query = base[0].tolist()
@@ -246,20 +285,85 @@ def test_cache_metrics_preserve_hit_miss_labels_and_exclude_warmup(e2e, tmp_path
         e2e.cache_counters(path, 1, 1)
 
 
+@pytest.mark.parametrize("phase", ["after_round_0", "after_round_1"])
+@pytest.mark.parametrize("error", ["disappeared", "decreased"])
+def test_cache_metrics_reject_lost_or_reset_counters(e2e, tmp_path, phase, error):
+    keys = {
+        outcome: json.dumps(
+            {
+                "name": "slatedb.db_cache.access_count",
+                "labels": {"entry_kind": "data_block", "result": outcome},
+            }
+        )
+        for outcome in ("hit", "miss")
+    }
+    snapshots = [
+        {
+            "type": "counter_snapshot",
+            "format_version": 1,
+            "phase": phase,
+            "counters": {key: index for key in keys.values()},
+        }
+        for index, phase in enumerate(e2e.resources.phases(1, 1))
+    ]
+    for snapshot in snapshots:
+        if snapshot["phase"] == phase:
+            if error == "disappeared":
+                del snapshot["counters"][keys["miss"]]
+            else:
+                snapshot["counters"][keys["miss"]] = 0
+    path = tmp_path / "metrics.jsonl"
+    path.write_text("\n".join(map(json.dumps, snapshots)))
+    with pytest.raises(RuntimeError, match=f"counter.*{error}"):
+        e2e.cache_counters(path, 1, 1)
+
+
+def test_cache_metrics_allow_counters_registered_during_a_round(e2e, tmp_path):
+    key = json.dumps(
+        {
+            "name": "slatedb.db_cache.access_count",
+            "labels": {"entry_kind": "data_block", "result": "hit"},
+        }
+    )
+    snapshots = [
+        {
+            "type": "counter_snapshot",
+            "format_version": 1,
+            "phase": phase,
+            "counters": {key: 5} if phase in ("after_round_1", "after_close") else {},
+        }
+        for phase in e2e.resources.phases(1, 1)
+    ]
+    path = tmp_path / "metrics.jsonl"
+    path.write_text("\n".join(map(json.dumps, snapshots)))
+    result = e2e.cache_counters(path, 1, 1)
+    assert result["measured_cache_access"]["data_block"] == {
+        "hit": 5,
+        "miss": 0,
+        "hit_fraction": 1,
+    }
+
+
+def write_sql_cache_events(path, hits):
+    path.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "event": "vortex_index_search_timing",
+                    "validation_mode": "snapshot",
+                    "provider_cache_hit": hit,
+                    "snapshot_cache_hit": hit,
+                },
+                separators=(",", ":"),
+            )
+            for hit in hits
+        )
+    )
+
+
 def test_sql_cache_diagnostics_are_not_block_cache_hit_rates(e2e, tmp_path):
     path = tmp_path / "stderr.log"
-    events = [
-        {
-            "event": "vortex_index_search_timing",
-            "validation_mode": "snapshot",
-            "provider_cache_hit": hit,
-            "snapshot_cache_hit": hit,
-        }
-        for hit in (False, True, True, True)
-    ]
-    path.write_text(
-        "\n".join(json.dumps(event, separators=(",", ":")) for event in events)
-    )
+    write_sql_cache_events(path, [False, True, True, True])
     result = e2e.sql_cache_hits(path, 2)
     assert result["provider_cache_hits"] == result["snapshot_cache_hits"] == 2
     assert result["initial_provider_cache_hit"] is False
@@ -268,11 +372,37 @@ def test_sql_cache_diagnostics_are_not_block_cache_hit_rates(e2e, tmp_path):
         e2e.sql_cache_hits(path, 2)
 
 
-@pytest.mark.parametrize("configured_nprobe", [None, 320])
-@pytest.mark.parametrize("opendata_first", [False, True])
-def test_resource_run_freezes_effective_nprobe_and_separates_recorders(
-    e2e, tmp_path, monkeypatch, configured_nprobe, opendata_first
+@pytest.mark.parametrize("field", ["provider_cache_hit", "snapshot_cache_hit"])
+@pytest.mark.parametrize(
+    "hits",
+    [
+        [False, False, False, False],
+        [True, True, True, True],
+        [False, False, True, True],
+        [False, True, False, True],
+        [False, True, True, False],
+        [0, True, True, True],
+        [False, True, True, 1],
+        [False, True, True, None],
+    ],
+)
+def test_sql_cache_diagnostics_require_an_initial_miss_then_hits(
+    e2e, tmp_path, field, hits
 ):
+    path = tmp_path / "stderr.log"
+    write_sql_cache_events(path, [False, True, True, True])
+    events = [json.loads(line) for line in path.read_text().splitlines()]
+    for event, hit in zip(events, hits):
+        event[field] = hit
+    path.write_text(
+        "\n".join(json.dumps(event, separators=(",", ":")) for event in events)
+    )
+    with pytest.raises(RuntimeError, match="cache.*miss.*hits"):
+        e2e.sql_cache_hits(path, 2)
+
+
+@pytest.fixture
+def resource_run(e2e, tmp_path, monkeypatch):
     entry = {
         "name": "sift100k",
         "files": {
@@ -286,7 +416,6 @@ def test_resource_run_freezes_effective_nprobe_and_separates_recorders(
         '[data.storage.object_store]\ntype="Local"\npath="/existing/store"\n'
         '[[params.recall]]\ndataset="sift100k"\n'
         'query_concurrency="1"\nblock_cache_bytes="1073741824"\n'
-        + (f'nprobe="{configured_nprobe}"\n' if configured_nprobe else "")
     )
     fixture = tmp_path / "fixture"
     fixture.mkdir()
@@ -305,11 +434,18 @@ def test_resource_run_freezes_effective_nprobe_and_separates_recorders(
         )
     )
     parity = tmp_path / "parity.json"
-    parity.write_text("[]")
+    parity.write_text(
+        json.dumps(
+            [
+                {"query": i, "ranked_hits": [{"id": 7, "distance": 0}]}
+                for i in range(1000)
+            ]
+        )
+    )
     monkeypatch.setattr(
         e2e.sift,
         "load_inputs",
-        lambda *args: (entry, np.zeros((1, 128)), [[0.0] * 128], [[]]),
+        lambda *args: (entry, np.zeros((1, 128)), [[0.0] * 128] * 2, [[], []]),
     )
     monkeypatch.setattr(
         e2e.sift,
@@ -320,9 +456,7 @@ def test_resource_run_freezes_effective_nprobe_and_separates_recorders(
             "pages": 12,
         },
     )
-    monkeypatch.setattr(e2e.sift, "expected_results", lambda *args: [[]])
     calls = []
-    effective_nprobe = configured_nprobe or 100
 
     def worker(root, name, binary, arguments, cwd, timeout, limits, threads, **flags):
         directory = root / name
@@ -331,11 +465,10 @@ def test_resource_run_freezes_effective_nprobe_and_separates_recorders(
         if name.startswith("opendata"):
             config = tomllib.loads(arguments(directory)[0].read_text())
             params = config["params"]["recall"][0]
-            assert int(params.get("nprobe", 100)) == effective_nprobe
             identity = {
-                "nprobe": effective_nprobe,
+                "nprobe": int(params.get("nprobe", 100)),
                 "block_cache_bytes": 1024**3,
-                "queries": 1,
+                "queries": 2,
                 "warmup_rounds": limits["warmup"],
                 "rounds": limits["rounds"],
                 "rayon_threads": threads,
@@ -345,6 +478,8 @@ def test_resource_run_freezes_effective_nprobe_and_separates_recorders(
         result = {"identity": identity, "recall_at_10": 1.0}
         suffix = "jsonl" if identity else "csv"
         (directory / f"samples.{suffix}").write_text(json.dumps(result))
+        if flags.get("sql_timing"):
+            write_sql_cache_events(directory / "stderr.log", [False, True, True, True])
         calls.append((name, limits, flags))
         return directory, {}
 
@@ -353,40 +488,61 @@ def test_resource_run_freezes_effective_nprobe_and_separates_recorders(
     monkeypatch.setattr(
         e2e, "parse_opendata", lambda path: json.loads(path.read_text())
     )
-    monkeypatch.setattr(e2e, "summarize_records", lambda records, *args: (records, []))
-    monkeypatch.setattr(e2e, "sql_cache_hits", lambda *args: {})
+
+    def summarize(records, base, queries, truth, warmup, rounds, expected=None):
+        if expected is not None:
+            assert expected == [[{"id": 7, "distance": 0}]] * len(queries)
+        return records, []
+
+    monkeypatch.setattr(e2e, "summarize_records", summarize)
     monkeypatch.setattr(e2e, "cache_counters", lambda *args: {})
-    order = ["sql-snapshot-capi", "opendata"]
-    if opendata_first:
-        order.reverse()
-    report = e2e.run(
-        e2e.argparse.Namespace(
-            queries=1,
-            warmup_rounds=1,
-            rounds=3,
-            timeout=10,
-            cpu=8,
-            memory_mib=2048,
-            minimum_recall=0.99,
-            recall_tolerance=0.002,
-            output_dir=tmp_path / "output",
-            input_manifest=tmp_path / "inputs.json",
-            dataset="sift100k",
-            fixture=fixture,
-            capi=binary,
-            parity_samples=parity,
-            opendata_maintenance="off",
-            opendata_config=original,
-            opendata_nprobe=None,
-            probes=64,
-            opendata=binary,
-            opendata_root=ROOT,
-            order=order,
-        )
+    monkeypatch.setattr(e2e.subprocess, "check_output", lambda *args, **kw: "revision")
+    opendata_root = tmp_path / "opendata"
+    opendata_root.mkdir()
+    cli = e2e.argparse.Namespace(
+        command="run",
+        queries=2,
+        warmup_rounds=1,
+        rounds=3,
+        timeout=10,
+        cpu=8,
+        memory_mib=2048,
+        minimum_recall=0.99,
+        recall_tolerance=0.002,
+        output_dir=tmp_path / "output",
+        input_manifest=tmp_path / "inputs.json",
+        dataset="sift100k",
+        fixture=fixture,
+        capi=binary,
+        parity_samples=parity,
+        opendata_maintenance="off",
+        opendata_config=original,
+        opendata_nprobe=None,
+        probes=64,
+        opendata=binary,
+        opendata_root=opendata_root,
+        order=["sql-snapshot-capi", "opendata"],
     )
+    return cli, calls
+
+
+@pytest.mark.parametrize("configured_nprobe", [None, 320])
+@pytest.mark.parametrize("opendata_first", [False, True])
+def test_resource_run_freezes_effective_nprobe_and_separates_recorders(
+    e2e, resource_run, configured_nprobe, opendata_first
+):
+    cli, calls = resource_run
+    if configured_nprobe is not None:
+        cli.opendata_config.write_text(
+            cli.opendata_config.read_text() + f'nprobe="{configured_nprobe}"\n'
+        )
+    if opendata_first:
+        cli.order.reverse()
+    report = e2e.run(cli)
+    effective_nprobe = configured_nprobe or 100
     assert report["status"] == "ok"
     assert report["configuration"]["nprobe"] == effective_nprobe
-    assert [name for name, _, _ in calls] == order + [
+    assert [name for name, _, _ in calls] == cli.order + [
         "sql-cache-diagnostic",
         "opendata-cache-diagnostic",
     ]
@@ -396,9 +552,95 @@ def test_resource_run_freezes_effective_nprobe_and_separates_recorders(
     assert calls[3][2]["opendata_counters"]
     assert all(limits["rounds"] == 1 for _, limits, _ in calls[2:])
     diagnostic = tomllib.loads(
-        (tmp_path / "output/opendata-diagnostic.toml").read_text()
+        (cli.output_dir / "opendata-diagnostic.toml").read_text()
     )
     assert int(diagnostic["params"]["recall"][0]["nprobe"]) == effective_nprobe
+
+
+@pytest.mark.parametrize("parity_count", [2, 1000])
+def test_run_accepts_matching_or_larger_parity_samples(e2e, resource_run, parity_count):
+    cli, _ = resource_run
+    samples = json.loads(cli.parity_samples.read_text())[:parity_count]
+    cli.parity_samples.write_text(json.dumps(samples + samples))
+    report = e2e.run(cli)
+    assert report["status"] == "ok"
+    assert report["queries"] == 2
+
+
+@pytest.mark.parametrize("query_ids", [[], [0], [0, 2]])
+def test_run_rejects_missing_parity_queries(e2e, resource_run, query_ids):
+    cli, calls = resource_run
+    samples = json.loads(cli.parity_samples.read_text())
+    cli.parity_samples.write_text(json.dumps([samples[i] for i in query_ids]))
+    with pytest.raises(RuntimeError, match="Missing query results"):
+        e2e.run(cli)
+    assert not calls
+
+
+def test_run_rejects_changed_parity_repeats(e2e, resource_run):
+    cli, calls = resource_run
+    samples = json.loads(cli.parity_samples.read_text())[:2]
+    samples.append({"query": 0, "ranked_hits": [{"id": 8, "distance": 0}]})
+    cli.parity_samples.write_text(json.dumps(samples))
+    with pytest.raises(RuntimeError, match="ID mismatch"):
+        e2e.run(cli)
+    assert not calls
+
+
+@pytest.mark.parametrize("store_path", ["absolute", "relative", "relative-decoy"])
+def test_resource_run_resolves_private_store_from_worker_directory(
+    e2e, resource_run, tmp_path, monkeypatch, store_path
+):
+    cli, calls = resource_run
+    store = cli.opendata_root / "data"
+    store.mkdir()
+    (store / "index").write_bytes(b"original store")
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    monkeypatch.chdir(caller)
+    cli.opendata_root = Path("../opendata")
+    if store_path == "relative-decoy":
+        (caller / "data").mkdir()
+        (caller / "data/index").write_bytes(b"unrelated store")
+    configured = str(store) if store_path == "absolute" else "data"
+    cli.opendata_config.write_text(
+        cli.opendata_config.read_text().replace("/existing/store", configured)
+    )
+    report = e2e.run(cli)
+    assert report["status"] == "ok"
+    for name, _, flags in calls:
+        if name.startswith("opendata"):
+            source, target = flags["private_store"]
+            assert source == store
+            assert source.is_absolute()
+            assert source.joinpath("index").read_bytes() == b"original store"
+            assert target == cli.output_dir / name / "private-store"
+    assert configured in cli.opendata_config.read_text()
+
+
+@pytest.mark.parametrize("field", ["provider_cache_hit", "snapshot_cache_hit"])
+def test_failed_sql_cache_diagnostic_marks_report_failed(
+    e2e, resource_run, monkeypatch, field
+):
+    cli, _ = resource_run
+    worker = e2e.run_worker
+
+    def cold_worker(*args, **kwargs):
+        directory, metadata = worker(*args, **kwargs)
+        if kwargs.get("sql_timing"):
+            path = directory / "stderr.log"
+            path.write_text(
+                path.read_text().replace(f'"{field}":true', f'"{field}":false')
+            )
+        return directory, metadata
+
+    monkeypatch.setattr(e2e, "run_worker", cold_worker)
+    monkeypatch.setattr(e2e.argparse.ArgumentParser, "parse_args", lambda *args: cli)
+    with pytest.raises(RuntimeError, match="cache.*miss.*hits"):
+        e2e.main([])
+    assert (
+        json.loads((cli.output_dir / "summary.json").read_text())["status"] == "failed"
+    )
 
 
 @pytest.fixture

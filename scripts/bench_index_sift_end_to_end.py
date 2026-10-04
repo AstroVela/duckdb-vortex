@@ -74,7 +74,7 @@ def build_capi(manifest, sdk, include, output, budget_mib):
         "link_manifest": str(manifest.resolve()),
         "link_manifest_sha256": bench.fingerprint(manifest),
         "sdk_root": str(sdk.resolve()),
-        "archive_sha256": bench.fingerprint(Path(archives[0])),
+        "archive_sha256": bench.fingerprint((sdk / archives[0]).resolve()),
         "retained_artifact_budget_bytes": budget_mib * 1024 * 1024,
         "budget": "provenance of the compiled archive, not a runtime setting",
     }
@@ -446,9 +446,14 @@ def cache_counters(path, warmup, rounds):
             by_phase[f"before_round_{round_id}"],
             by_phase[f"after_round_{round_id}"],
         )
+        bench.require(
+            first.keys() <= last.keys(),
+            f"Metric counter disappeared in round {round_id}",
+        )
         counts = {key: value - first.get(key, 0) for key, value in last.items()}
         bench.require(
-            all(value >= 0 for value in counts.values()), "Metric counter decreased"
+            all(value >= 0 for value in counts.values()),
+            f"Metric counter decreased in round {round_id}",
         )
         deltas.append(
             {"round": round_id, "warmup": round_id < warmup, "counters": counts}
@@ -494,6 +499,12 @@ def sql_cache_hits(path, count):
         all(event["validation_mode"] == "snapshot" for event in events),
         "Diagnostic validation mode differs",
     )
+    for field in ("provider_cache_hit", "snapshot_cache_hit"):
+        bench.require(
+            events[0].get(field) is False
+            and all(event.get(field) is True for event in events[1:]),
+            f"Expected {field}: initial cache miss followed by hits",
+        )
     measured = events[count:]
     return {
         "queries": count,
@@ -580,9 +591,12 @@ def run(cli):
         fixture["artifact_bytes"] <= build["retained_artifact_budget_bytes"],
         "Snapshot exceeds compiled budget",
     )
-    expected = sift.expected_results(json.loads(cli.parity_samples.read_text()), 1000)[
-        : cli.queries
-    ]
+    parity_samples = json.loads(cli.parity_samples.read_text())
+    expected = sift.expected_results(
+        parity_samples, len({sample["query"] for sample in parity_samples})
+    )
+    bench.require(len(expected) >= cli.queries, "Missing query results")
+    expected = expected[: cli.queries]
     bench.write_json(root / "inputs.json", entry)
     settings_path = None
     if cli.opendata_maintenance == "off":
@@ -597,7 +611,7 @@ def run(cli):
             "storage"
         ]
         private_store = (
-            Path(original_storage["object_store"]["path"]).resolve(),
+            (cli.opendata_root / original_storage["object_store"]["path"]).resolve(),
             root / "opendata" / "private-store",
         )
     config, nprobe = opendata_config(

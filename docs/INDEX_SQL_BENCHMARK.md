@@ -342,14 +342,17 @@ no query producer/QPS limiter in this workload. Raw records are validated agains
 the original fvecs, squared L2 distances and original ground truth, including
 warmup. Each engine's ranked results must agree across repeats; only the SQL
 results must agree with SPFresh Provider parity. Cross-engine ANN rankings need
-not be identical.
+not be identical. Parity samples must cover every requested query; a larger
+contiguous query set can be reused for a smaller `--queries` run. All supplied
+parity repeats are checked before selecting that prefix.
 
 The C API executable is compiled against the qualified DuckDB headers and linked
 with the exact libraries/extension archive from a recorded shell link command,
 replacing only shell object files. It does not rebuild or change the extension.
 `build-capi` records the compile/link argv, source/archive/binary hashes and
 declared compiled artifact budget; the budget flag is provenance, not a runtime
-setting. For example:
+setting. Relative archive paths are resolved against `--sdk-root`, matching the
+linker's working directory. For example:
 
 ```bash
 uv run --with numpy python scripts/bench_index_sift_end_to_end.py build-capi \
@@ -385,6 +388,9 @@ query/ground-truth paths and unchanged nprobe. Omitted nprobe remains omitted in
 the generated config; the effective value comes from the running engine, not a
 duplicated default in Python. There is no ingest or index tuning. Each output
 directory must be new. A partial report is retained with failed status on errors.
+Relative local object-store paths are resolved against `--opendata-root`, the
+worker's working directory, including when staging private copies under resource
+limits.
 
 For SIFT1M, use the original `nprobe256.toml`, `--probes 512` and a separately
 linked **benchmark-only 1 GiB** C API binary. The default 256 MiB artifact budget
@@ -541,6 +547,12 @@ SlateDB `db_cache.access_count` keeps hit/miss and entry-kind labels. Its fetch
 hits include requests sharing an in-flight load. SQL provider/snapshot hits
 mean retained handles/source buffers, not posting-block or OS-cache hits. These
 are different metrics and must not be combined into a common cache-hit rate.
+SQL diagnostics require an initial miss in both caches and hits on every later
+query, including the rest of warmup. Each OpenData round-end snapshot must retain
+every counter from its round-start snapshot without decreasing its value; new
+counters may appear during the round. Violations fail the run instead of producing
+an `ok` report. The OpenData recorder drains histogram buckets at each snapshot,
+so duration histogram counts are not used as cache-access counters.
 This is a more controlled warm resource/quality comparison, not identical cache
 implementations or strict-default SQL performance.
 
