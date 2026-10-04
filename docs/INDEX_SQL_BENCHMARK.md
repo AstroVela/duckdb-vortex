@@ -548,20 +548,30 @@ hits include requests sharing an in-flight load. SQL provider/snapshot hits
 mean retained handles/source buffers, not posting-block or OS-cache hits. These
 are different metrics and must not be combined into a common cache-hit rate.
 SQL diagnostics require an initial miss in both caches and hits on every later
-query, including the rest of warmup. Each OpenData round-end snapshot must retain
-every counter from its round-start snapshot without decreasing its value; new
-counters may appear during the round. Violations fail the run instead of producing
-an `ok` report. The OpenData recorder drains histogram buckets at each snapshot,
-so duration histogram counts are not used as cache-access counters.
+query, including the rest of warmup. Before calculating any OpenData round deltas,
+the driver validates every adjacent pair of snapshots: each registered counter
+must remain present and never decrease, including across warmup, round boundaries
+and close. Newly registered counters are allowed. Violations identify the phase
+and counter and fail the run instead of producing an `ok` report. This contract
+applies to every exported counter; the harness must omit interval histogram counts
+or convert them to cumulative totals before exporting them as counters.
 This is a more controlled warm resource/quality comparison, not identical cache
 implementations or strict-default SQL performance.
 
 #### Local Resource-Controlled Results, 2026-10-02
 
-Both final reports pass resource, quality, full-record and repeat checks, with no
-logged errors or OOMs. Main workers have recorder/tracing disabled. Each result
-contains 3,000 measured calls after one complete 1,000-query warmup, with the
-same 2 GiB/one-logical-CPU limits. OpenData maintenance is off in both datasets.
+The 2026-10-02 and 2026-10-03 reports below were accepted by the earlier driver.
+Their OpenData harness exported duration histogram counts as cumulative counters
+even though each snapshot drains the histogram buckets. The current checks of
+adjacent snapshots reject these historical diagnostic files when those counters
+disappear or decrease. Correct the harness and collect new diagnostics before
+claiming qualification under the current checks; the latency tables remain
+historical measurements.
+
+Both final reports passed the earlier resource, quality, full-record and repeat
+checks with no logged errors or OOMs. Main workers have recorder/tracing disabled.
+Each result contains 3,000 measured calls after one complete 1,000-query warmup,
+with the same 2 GiB/one-logical-CPU limits. OpenData maintenance is off in both datasets.
 
 | Workload | SQL snapshot C API p50 / p99 ms | OpenData API p50 / p99 ms | SQL / OpenData Recall@10 | OpenData nprobe |
 | --- | ---: | ---: | ---: | ---: |
@@ -650,10 +660,10 @@ run length and host conditions can all affect comparisons with the older runs.
 
 Each headline worker validates 60,000 full records, including warmup, and
 contains 5,000 measured calls. All repeats and SQL/Provider parity checks pass.
-Both reports are `ok`, satisfy the same Recall floor/gap checks and verify live
-resource limits for all main and diagnostic workers, with no logged errors or
-OOM events. Diagnostics remain separate from headline timing. These are warm
-explicit-snapshot SQL results, not strict-default or cold-disk latencies.
+The earlier driver marked both reports `ok`, with the same Recall floor/gap checks
+and verified live resource limits for all main and diagnostic workers, with no
+logged errors or OOM events. Diagnostics remain separate from headline timing.
+These are warm explicit-snapshot SQL results, not strict-default or cold-disk latencies.
 
 SQL's 1M round p50s are 16.905/16.747/16.699/16.852/17.250 ms; the earlier
 16.316-to-19.312 ms upward trend does not recur. OpenData's 1M round p50s are

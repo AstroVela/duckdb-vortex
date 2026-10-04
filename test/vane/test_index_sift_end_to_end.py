@@ -285,7 +285,19 @@ def test_cache_metrics_preserve_hit_miss_labels_and_exclude_warmup(e2e, tmp_path
         e2e.cache_counters(path, 1, 1)
 
 
-@pytest.mark.parametrize("phase", ["after_round_0", "after_round_1"])
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "ready",
+        "before_round_0",
+        "before_first_search",
+        "after_first_search",
+        "after_round_0",
+        "before_round_1",
+        "after_round_1",
+        "after_close",
+    ],
+)
 @pytest.mark.parametrize("error", ["disappeared", "decreased"])
 def test_cache_metrics_reject_lost_or_reset_counters(e2e, tmp_path, phase, error):
     keys = {
@@ -302,7 +314,7 @@ def test_cache_metrics_reject_lost_or_reset_counters(e2e, tmp_path, phase, error
             "type": "counter_snapshot",
             "format_version": 1,
             "phase": phase,
-            "counters": {key: index for key in keys.values()},
+            "counters": {key: index + 1 for key in keys.values()},
         }
         for index, phase in enumerate(e2e.resources.phases(1, 1))
     ]
@@ -316,6 +328,43 @@ def test_cache_metrics_reject_lost_or_reset_counters(e2e, tmp_path, phase, error
     path.write_text("\n".join(map(json.dumps, snapshots)))
     with pytest.raises(RuntimeError, match=f"counter.*{error}"):
         e2e.cache_counters(path, 1, 1)
+
+
+@pytest.mark.parametrize("rounds", [1, 3])
+@pytest.mark.parametrize("error", ["disappeared", "decreased"])
+def test_cache_metrics_reject_counter_loss_between_rounds(e2e, tmp_path, rounds, error):
+    keys = {
+        outcome: json.dumps(
+            {
+                "name": "slatedb.db_cache.access_count",
+                "labels": {"entry_kind": "data_block", "result": outcome},
+            }
+        )
+        for outcome in ("hit", "miss")
+    }
+    phases = e2e.resources.phases(1, rounds)
+    boundary = phases.index("before_round_1")
+    snapshots = []
+    for index, phase in enumerate(phases):
+        counters = {keys["hit"]: index * 9, keys["miss"]: index}
+        if index >= boundary:
+            if error == "disappeared":
+                del counters[keys["miss"]]
+            else:
+                counters[keys["miss"]] -= boundary
+        snapshots.append(
+            {
+                "type": "counter_snapshot",
+                "format_version": 1,
+                "recording": True,
+                "phase": phase,
+                "counters": counters,
+            }
+        )
+    path = tmp_path / "metrics.jsonl"
+    path.write_text("\n".join(map(json.dumps, snapshots)))
+    with pytest.raises(RuntimeError, match=f"counter.*{error}"):
+        e2e.cache_counters(path, 1, rounds)
 
 
 def test_cache_metrics_allow_counters_registered_during_a_round(e2e, tmp_path):

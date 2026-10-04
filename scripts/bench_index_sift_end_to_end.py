@@ -428,6 +428,7 @@ def cache_counters(path, warmup, rounds):
         [item["phase"] for item in snapshots] == resources.phases(warmup, rounds),
         "Incomplete cache counter phases",
     )
+    previous = {}
     for item in snapshots:
         bench.require(
             item["type"] == "counter_snapshot"
@@ -439,6 +440,18 @@ def cache_counters(path, warmup, rounds):
             ),
             "Invalid cache counters",
         )
+        counters = item["counters"]
+        missing = previous.keys() - counters.keys()
+        bench.require(
+            not missing,
+            f"Metric counter disappeared at {item['phase']}: {sorted(missing)}",
+        )
+        decreased = [key for key, value in previous.items() if counters[key] < value]
+        bench.require(
+            not decreased,
+            f"Metric counter decreased at {item['phase']}: {sorted(decreased)}",
+        )
+        previous = counters
     by_phase = {item["phase"]: item["counters"] for item in snapshots}
     deltas = []
     for round_id in range(warmup + rounds):
@@ -446,15 +459,7 @@ def cache_counters(path, warmup, rounds):
             by_phase[f"before_round_{round_id}"],
             by_phase[f"after_round_{round_id}"],
         )
-        bench.require(
-            first.keys() <= last.keys(),
-            f"Metric counter disappeared in round {round_id}",
-        )
         counts = {key: value - first.get(key, 0) for key, value in last.items()}
-        bench.require(
-            all(value >= 0 for value in counts.values()),
-            f"Metric counter decreased in round {round_id}",
-        )
         deltas.append(
             {"round": round_id, "warmup": round_id < warmup, "counters": counts}
         )
