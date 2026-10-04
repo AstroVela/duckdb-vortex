@@ -201,7 +201,16 @@ def main(argv: list[str] | None = None) -> int:
                     (
                         str(python),
                         "-I",
-                        str(vane_source / "scripts/verify_extension_wheel.py"),
+                        str(
+                            Path(__file__).resolve().parents[1]
+                            / "vane-extension-ci-tools/scripts/vane_provider_build.py"
+                        ),
+                        "--extension-root",
+                        str(Path(__file__).resolve().parents[1]),
+                        "--vane-source",
+                        str(vane_source),
+                        "--operation",
+                        "verify",
                         "--base-wheel",
                         str(runtime),
                         "--extension-wheel",
