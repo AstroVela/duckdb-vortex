@@ -114,6 +114,37 @@ def test_oom_disqualifies_a_completed_phase(resources):
         resources.verify_limits(snapshot, 8, 2048)
 
 
+@pytest.mark.parametrize("posting_view", ["0", "1"])
+def test_worker_command_forwards_only_allowed_posting_view_environment(
+    resources, tmp_path, monkeypatch, posting_view
+):
+    commands = []
+
+    def capture_command(command, **kwargs):
+        commands.append(command)
+        raise RuntimeError("captured worker command")
+
+    monkeypatch.setattr(resources.subprocess, "Popen", capture_command)
+    monkeypatch.setattr(resources.subprocess, "run", lambda *args, **kwargs: None)
+    with pytest.raises(RuntimeError, match="captured worker command"):
+        resources.run_constrained(
+            ["worker"],
+            tmp_path,
+            {
+                "VORTEX_SPFRESH_POSTING_VIEW": posting_view,
+                "UNRELATED_CREDENTIAL": "not-a-secret-test-value",
+            },
+            tmp_path,
+            min(os.sched_getaffinity(0)),
+            256,
+            30,
+            1,
+            1,
+        )
+    assert f"--setenv=VORTEX_SPFRESH_POSTING_VIEW={posting_view}" in commands[0]
+    assert not any("UNRELATED_CREDENTIAL" in part for part in commands[0])
+
+
 @pytest.mark.skipif(
     os.environ.get("VORTEX_SIFT_SYSTEMD_TESTS") != "1",
     reason="Set VORTEX_SIFT_SYSTEMD_TESTS=1 on a cgroup-v2/systemd-user host",
@@ -143,6 +174,42 @@ def test_real_systemd_worker_constraints_and_phase_handshake(resources, tmp_path
     assert result["snapshots"][0]["cpu_affinity"] == [cpu]
     assert not result["snapshots"][-1]["cgroup"]["memory.events"]["oom_kill"]
     assert json.loads((tmp_path / "constraints.json").read_text())["verified"]
+
+
+@pytest.mark.skipif(
+    os.environ.get("VORTEX_SIFT_SYSTEMD_TESTS") != "1",
+    reason="Set VORTEX_SIFT_SYSTEMD_TESTS=1 on a cgroup-v2/systemd-user host",
+)
+@pytest.mark.parametrize("posting_view", ["0", "1"])
+def test_real_systemd_worker_preserves_posting_view_without_forwarding_credentials(
+    resources, tmp_path, posting_view
+):
+    worker = tmp_path / "worker.py"
+    worker.write_text(
+        "import os, sys\n"
+        "assert os.environ['VORTEX_SPFRESH_POSTING_VIEW'] == sys.argv[1]\n"
+        "assert 'UNRELATED_CREDENTIAL' not in os.environ\n"
+        "for phase in sys.argv[2:]:\n"
+        " print(f'SIFT_BENCH_PHASE {os.getpid()} {phase}', flush=True)\n"
+        " assert sys.stdin.readline() == 'continue\\n'\n"
+    )
+    result = resources.run_constrained(
+        [sys.executable, str(worker), posting_view, *resources.phases(1, 1)],
+        tmp_path,
+        {
+            "VORTEX_SPFRESH_POSTING_VIEW": posting_view,
+            "UNRELATED_CREDENTIAL": "not-a-secret-test-value",
+        },
+        tmp_path,
+        min(os.sched_getaffinity(0)),
+        256,
+        30,
+        1,
+        1,
+    )
+    assert result["verified"]
+    assert f"--setenv=VORTEX_SPFRESH_POSTING_VIEW={posting_view}" in result["command"]
+    assert not any("UNRELATED_CREDENTIAL" in part for part in result["command"])
 
 
 @pytest.mark.skipif(

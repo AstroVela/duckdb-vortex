@@ -847,6 +847,7 @@ def main(argv=None):
             "cache": "OS page cache not dropped; frozen files, sequential processes; no SlateDB 1-GiB cache equivalence claimed",
             "limits": "Fixture builder input budget is explicitly 512 MiB; default SQL and Provider limits are unchanged. Any separately compiled snapshot shell and its declared retained-artifact budget are labeled as benchmark-only; oversized default snapshots are verified to reject",
             "workspace": "cpp-reuse is a direct single-handle/thread lower bound without bridge lifecycle/option guards; bridge/provider/SQL behavior depends on the recorded binaries",
+            "spfresh_posting_view": os.environ.get("VORTEX_SPFRESH_POSTING_VIEW", "1"),
             "environment": {
                 key: os.environ.get(key)
                 for key in (

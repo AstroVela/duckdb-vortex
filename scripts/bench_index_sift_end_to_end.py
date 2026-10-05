@@ -329,6 +329,7 @@ def run_worker(
         OMP_NUM_THREADS="1",
         RUST_LOG="warn",
         VORTEX_INDEX_TIMING="1" if sql_timing else "0",
+        VORTEX_SPFRESH_POSTING_VIEW=os.environ.get("VORTEX_SPFRESH_POSTING_VIEW", "1"),
         RAYON_NUM_THREADS=str(worker_threads),
         TOKIO_WORKER_THREADS=str(worker_threads),
     )
@@ -407,6 +408,7 @@ def run_worker(
                 "RAYON_NUM_THREADS",
                 "TOKIO_WORKER_THREADS",
                 "VORTEX_INDEX_TIMING",
+                "VORTEX_SPFRESH_POSTING_VIEW",
                 *(("SIFT_BENCH_RECORD_COUNTERS",) if limits else ()),
             )
         },
@@ -543,6 +545,8 @@ def qualify_recall(modes, minimum, tolerance):
 
 
 def run(cli):
+    posting_view = os.environ.get("VORTEX_SPFRESH_POSTING_VIEW", "1")
+    bench.require(posting_view in ("0", "1"), "Invalid SPFresh posting-view mode")
     bench.require(
         1 <= cli.queries <= 1000
         and 1 <= cli.warmup_rounds <= 100
@@ -690,6 +694,7 @@ def run(cli):
             "sha256": bench.fingerprint(cli.parity_samples),
         },
         "configuration": {
+            "spfresh_posting_view": posting_view,
             "nprobe": nprobe,
             "internal_results": cli.probes,
             "max_check": 32768,
