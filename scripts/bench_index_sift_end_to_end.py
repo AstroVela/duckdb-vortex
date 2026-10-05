@@ -673,6 +673,8 @@ def run(cli):
                 "benchmark_sources": {
                     name: bench.fingerprint(cli.opendata_root / name)
                     for name in (
+                        "bencher/src/metrics.rs",
+                        "bencher/Cargo.toml",
                         "vector/bench/src/recall.rs",
                         "vector/bench/src/recall/repeat.rs",
                         "vector/bench/src/bin/sift_repeat.rs",

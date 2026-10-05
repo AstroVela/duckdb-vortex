@@ -591,6 +591,8 @@ def test_resource_run_freezes_effective_nprobe_and_separates_recorders(
     effective_nprobe = configured_nprobe or 100
     assert report["status"] == "ok"
     assert report["configuration"]["nprobe"] == effective_nprobe
+    sources = report["binaries"]["opendata"]["benchmark_sources"]
+    assert {"bencher/src/metrics.rs", "bencher/Cargo.toml"} <= sources.keys()
     assert [name for name, _, _ in calls] == cli.order + [
         "sql-cache-diagnostic",
         "opendata-cache-diagnostic",
