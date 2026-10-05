@@ -555,8 +555,156 @@ and close. Newly registered counters are allowed. Violations identify the phase
 and counter and fail the run instead of producing an `ok` report. This contract
 applies to every exported counter; the harness must omit interval histogram counts
 or convert them to cumulative totals before exporting them as counters.
+The corrected OpenData harness uses `BenchRecorder::snapshot_counters` to read
+registered counters directly, without draining histograms or exporting their
+derived counts. This is not a metric-name allowlist: genuine counters with a
+`_count` suffix remain included, even when a histogram has the same derived
+count name. Reports hash `bencher/src/metrics.rs` and `bencher/Cargo.toml` alongside
+the existing benchmark sources so the recorder implementation is traceable.
 This is a more controlled warm resource/quality comparison, not identical cache
 implementations or strict-default SQL performance.
+
+#### Repeat After Host Load Check, 2026-10-05
+
+Following a report of host load during the previous run, both datasets were
+rerun with the same frozen binaries, inputs, Provider parity, search parameters,
+engine order and resource settings. Each main worker again uses 1,000 queries,
+one warmup and three measured rounds, with independent cache diagnostics.
+No benchmark implementation or binary was rebuilt for this repeat.
+
+The matching OpenData harness and recorder sources are committed as
+`68cde646d05165ece33c6e56fe4f345ce6a64f17`. Raw reports retain their original
+measurement-time base revision and source-file hashes.
+
+| Workload | SQL snapshot C API p50 / p99 ms | OpenData API p50 / p99 ms | SQL / OpenData Recall@10 |
+| --- | ---: | ---: | ---: |
+| SIFT100K | 5.37 / 5.85 | 11.40 / 12.33 | 99.77% / 99.59% |
+| SIFT1M | 13.96 / 17.31 | 37.45 / 42.45 | 99.40% / 99.46% |
+
+The first 100K repeat passed all driver checks and gave SQL 5.33/5.78 ms and
+OpenData 11.77/13.86 ms. One-second host samples showed CPU 26, the benchmark
+CPU's SMT sibling, averaging only 94.33% idle during OpenData's measured rounds.
+A complete second 100K run was therefore collected and selected for the table
+based on its quieter sibling trace. All first-run data is retained.
+
+For the selected runs, CPU 26 averages 100.00%/99.94% idle during SQL/OpenData
+100K measured rounds and 99.39%/99.73% on 1M. None of their measured samples
+has sibling idle below 90%. Samples are aligned with monotonic phase snapshots
+using the post-run wall-clock offset; only complete one-second intervals inside
+measured rounds are used. These round windows include work outside the API timer
+and the host remains unisolated.
+
+SQL round medians are 5.338/5.373/5.385 ms on 100K and
+13.919/13.945/13.997 ms on 1M. OpenData's are 11.467/11.373/11.363 and
+37.050/37.505/37.635 ms. Compared with the preceding run, 1M SQL p50 is 6.4%
+lower and p99 is 38.3% lower. This is a timing comparison with unchanged
+artifacts; the prior run has no continuous sibling trace to isolate causation.
+
+Both selected reports pass Recall, complete-record, repeat/Provider parity,
+counter continuity and live resource checks, with zero OOMs or logged errors.
+Each main worker verifies 40,000 records and measures 3,000 calls. Diagnostics
+retain 60 registered counter series through close; data-block hits/misses are
+510,636/0 and 1,208,324/0. SQL has an initial Provider/source miss and all later
+queries hit, including 1,000/1,000 measured hits in each cache.
+
+Main RSS/cgroup peaks are SQL 140/281 MiB and OpenData 175/544 MiB on 100K,
+and SQL 388/861 MiB and OpenData 1,089/2,048 MiB on 1M. OpenData 1M records
+4,872 whole-worker memory-pressure events, including staging, with no OOM.
+All main measured storage-read and major-fault deltas are zero. Different cache
+semantics and the charged-memory limitations described above still apply.
+
+Selected raw reports are
+`build/index-sift100k-counter-recheck-20261005/summary.json` and
+`build/index-sift1m-counter-repeat-20261005/summary.json`. The first 100K report
+is `build/index-sift100k-counter-repeat-20261005/summary.json`. Host traces,
+phase-aligned analyses and the analysis script are retained under `build/`.
+The overview, exact reproduction arguments and computed comparison are in
+`/home/kaka/opendata/bench-runs/sift-counter-repeat-20261005/`.
+Existing code tests were not rerun: this work reuses the previously qualified
+artifacts and adds benchmark/report verification. Raw samples, host traces and
+binary artifacts are retained locally.
+
+#### Counter-Qualified Baseline, 2026-10-04
+
+Both datasets now pass the current adjacent-snapshot checks without weakening
+the driver. The OpenData diagnostic fix exports only genuine cumulative counters
+and leaves histogram samples intact. Two regressions failed before the fix:
+a same-named histogram increased a native counter from 7 to 9, and collecting
+counter diagnostics consumed histogram samples. Both now pass; additional tests
+cover labels, idle phases, zero counters and later registration.
+
+The driver is based on PR #30's formal merge
+`b0eb820313314f6d18cfd5e2899fee69b1befd1f`, with recorder-source hashes added.
+SQL deliberately reuses the exact 2026-10-02 C API binaries and build manifests,
+not newly built merge-head or posting-view binaries. OpenData is rebuilt with
+the same Rust 1.97.1 release settings; its search implementation is unchanged.
+Input, SQL binary, Provider parity and search-configuration identities match
+the older resource-controlled runs for both datasets.
+
+Each main worker runs the original first 1,000 queries, k=10, one complete
+warmup and three measured rounds. CPU 8, a one-core quota, 2 GiB memory, no swap,
+single compute workers, maintenance disabled and cache budgets are unchanged.
+SQL probes are 64/512 and OpenData nprobe is 100/320 for 100K/1M. Order remains
+SQL-first for 100K and OpenData-first for 1M. The 64-query smoke passed before
+these runs and is not included in the headline results.
+
+| Workload | SQL snapshot C API p50 / p99 ms | OpenData API p50 / p99 ms | SQL / OpenData Recall@10 |
+| --- | ---: | ---: | ---: |
+| SIFT100K | 5.36 / 5.86 | 11.67 / 13.51 | 99.77% / 99.59% |
+| SIFT1M | 14.91 / 28.05 | 38.42 / 44.14 | 99.40% / 99.46% |
+
+Every main worker validates 40,000 complete records, including warmup, with
+3,000 measured calls. Repeat parity, SQL/Provider parity and the Recall floor/gap
+all pass. SQL round p50s are 5.329/5.359/5.398 ms on 100K and
+14.896/14.951/14.884 ms on 1M; OpenData's are 11.735/11.635/11.621 and
+38.608/38.448/38.200 ms. These are warm explicit-snapshot results, not strict
+SQL defaults or cold-disk latency. The host/SMT sibling remain unisolated.
+Differences from earlier timings are not evidence of an algorithmic speedup:
+SQL binaries are unchanged, and headline workers disable diagnostics.
+
+Both independent one-warmup/one-measured diagnostics retain 60 registered
+counter series after first search through close, with every adjacent snapshot
+passing presence and monotonicity validation. Measured SlateDB data-block hits
+are 510,636/1,208,324 for 100K/1M, with zero misses. Index/filter misses are also
+zero; unused stats counters have no hit rate. SQL diagnostics have an initial
+Provider/source miss, hits on every subsequent query, and 1,000/1,000 measured
+hits. These remain different cache metrics, not proof of identical caches.
+
+Main peak RSS / cgroup peak are SQL 140/281 MiB and OpenData 172/359 MiB on
+100K, and SQL 389/859 MiB and OpenData 1,084/2,048 MiB on 1M. OpenData 1M
+records 3,678 whole-worker memory-limit pressure events, including staging;
+all eight main/diagnostic workers have verified live limits, no OOMs and no
+logged errors. All main measured kernel storage reads and major faults are
+zero. SQL measured logical reads remain 13,133,244,738/68,953,285,689 bytes,
+versus OpenData's 56,547/438,309. These whole-round counters include work
+outside the API timer and are not physical disk traffic or pure search CPU.
+
+Fresh-process first searches cost SQL/OpenData 1,975/56 ms on 100K and
+5,847/160 ms on 1M, excluding separate database open costs. Warm medians do
+not remove SQL's first-use validation and materialization cost.
+
+Raw reports are in the `feat/vane-index-counter-baseline-20261004` worktree:
+
+- `build/index-sift100k-counter-final-20261004/summary.json`
+- `build/index-sift1m-counter-final-20261004/summary.json`
+- `build/index-sift100k-counter-smoke-20261004/summary.json`
+
+They retain full records, timings, diagnostic counters, resource snapshots,
+configs, frozen drivers and binary/source hashes. The local overview and exact
+commands are in
+`/home/kaka/opendata/bench-runs/sift-counter-baseline-20261004/summary.md`.
+That directory also preserves both OpenData binaries, source bundles and
+`build.json`; the new binary SHA-256 is
+`536c4abfa33be998a2d05fa377696eb318c5b1f4a76c710ed97ebb513470a5a1`.
+Original stores and all historical reports remain untouched.
+
+Verification: 30 Rust library tests, 237 Python tests including real C API and
+systemd/cgroup cases with no skips, scoped all-target/all-feature Clippy,
+Rustfmt, Black and Python 3.11 Ruff checks (`E4,E7,E9,F,I`). Doctest checking
+passed with no runnable cases and two existing ignored examples. Broader Ruff
+rules still flag pre-existing executable-bit and `subprocess.run(check=...)`
+warnings; this change does not rewrite unrelated code. No full workspace
+build/test, remote CI, ASAN or paid service was run.
 
 #### Local Resource-Controlled Results, 2026-10-02
 
