@@ -46,6 +46,13 @@ but not a development, local, epoch or noncanonical version.
 
 ## Build and qualification
 
+Both CI and release builds prefetch GNU Bison 3.8.2 with
+`scripts/fetch_vane_bison.py` before invoking the pinned Vane bootstrap. Downloads
+have bounded connection/transfer timeouts and fall back from the GNU origin to
+the kernel.org GNU mirror. Only an archive matching the bootstrap's fixed
+SHA-256 enters `VANE_BUILD_TOOLS_DIR`; the original bootstrap verifies it again
+before building. A valid cached archive is reused without network access.
+
 `.github/workflows/VaneIntegration.yml` retains ordinary DuckDB isolation and
 Vane native/static-wheel, default Ray smoke, two-node Ray, and ASAN/LSAN lifecycle coverage.
 Ordinary DuckDB inputs and the native Rust adapter stay unchanged.
