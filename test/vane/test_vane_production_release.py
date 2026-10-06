@@ -63,6 +63,21 @@ def test_vortex_adapters_and_lockfiles_match_the_reviewed_source(manifest):
     }
 
 
+def test_installed_wheel_workflow_matches_the_reviewed_vortex_source():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/VaneIntegration.yml").read_text()
+    )
+    environment = workflow["env"]
+    assert environment["VORTEX_EXPECTED_REVISION"] == builder.EXPECTED_VORTEX_REVISION
+    locked = tomllib.loads((ROOT / "vortex-extension-vane/Cargo.lock").read_text())
+    versions = {
+        package["version"]
+        for package in locked["package"]
+        if package["name"] == "vortex-duckdb"
+    }
+    assert versions == {environment["VORTEX_EXPECTED_VERSION"]}
+
+
 def runs(job):
     return "\n".join(step.get("run", "") for step in job["steps"])
 
@@ -89,7 +104,7 @@ def test_production_manifest_preserves_every_other_source_contract(future_revisi
     assert prod == dev
     assert builder.EXPECTED_RUST_RELEASE == "1.97.1"
     assert (
-        builder.EXPECTED_VORTEX_REVISION == "67303ad0157f873eea54e9f333737a4ad6bdaa36"
+        builder.EXPECTED_VORTEX_REVISION == "30265bd0fdcf70477acaff3f380a015dc6b2f261"
     )
     assert builder.SIGNING_PROFILES["production"] == ("astrovela/vane", None)
 

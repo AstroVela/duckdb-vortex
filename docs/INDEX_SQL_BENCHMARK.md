@@ -564,9 +564,40 @@ the existing benchmark sources so the recorder implementation is traceable.
 This is a more controlled warm resource/quality comparison, not identical cache
 implementations or strict-default SQL performance.
 
+#### Verified-Open Dependency Alignment, 2026-10-07
+
+Both extension adapters, their lockfiles, the production wheel source gate and
+the installed-wheel workflow now use Vortex PR #18's formal merge,
+`30265bd0fdcf70477acaff3f380a015dc6b2f261`. It includes the posting views below
+and the verified-open path that validates artifacts while creating their private
+copies. See the upstream
+[verified-open report](https://github.com/AstroVela/vortex/blob/30265bd0fdcf70477acaff3f380a015dc6b2f261/vortex-duckdb/VERIFIED_OPEN_BENCHMARK.md)
+for that optimization's measurements.
+
+PR #32's installed-wheel smoke had retained the older `c6f7e497` workflow pin
+while its lockfile used `67303ad0`. The source preflight rejected this mismatch
+before installing or running the wheel. A regression now compares the workflow's
+expected revision and version with the reviewed build source and lockfile; it
+failed before the workflow correction. Each regenerated lockfile changes only
+39 Vortex Git source IDs, with every other parsed field unchanged.
+
+The merged source passes 76 focused release/workflow tests and 48 subtests,
+both adapters' locked all-feature scoped Clippy, and a fresh Vane Rust release
+build. Relinking the recorded DuckDB v1.5.0 SDK objects with that unpatched
+archive passes the SQL regression in both copying and view modes: 66 independent
+processes, 38 negative cases and fixture Recall@10 of 1.0 per mode. Provenance
+and per-process logs are retained at `build/verified-open-merged-20261007/`.
+The installed-wheel source preflight itself accepts the current pin and rejects
+the stale one. Remote wheel/Ray qualification is a separate CI run.
+
+The SIFT tables below retain their measured `67303ad0` source identity. They are
+not measurements of `30265bd0`; this dependency update does not rerun the full
+SIFT performance matrix or change the default cache budgets.
+
 #### Merged Posting-View Integration, 2026-10-05
 
-Both extension adapters and their lockfiles now pin Vortex PR #17's formal merge,
+For these measurements, both extension adapters and their lockfiles pinned
+Vortex PR #17's formal merge,
 `67303ad0157f873eea54e9f333737a4ad6bdaa36`, from duckdb-vortex PR #31's merge
 `348d44eebb39009c291c776104a6c6649d8460d5`. Each lockfile changes only 39 Vortex
 Git source IDs; other parsed fields are identical. The production wheel source
