@@ -192,6 +192,7 @@ def run_constrained(
             "TOKIO_WORKER_THREADS",
             "RUST_LOG",
             "VORTEX_INDEX_TIMING",
+            "VORTEX_SPFRESH_POSTING_VIEW",
         )
         or key.startswith("SIFT_BENCH_")
     )

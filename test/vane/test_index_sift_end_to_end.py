@@ -618,6 +618,31 @@ def test_run_accepts_matching_or_larger_parity_samples(e2e, resource_run, parity
     assert report["queries"] == 2
 
 
+@pytest.mark.parametrize("posting_view", [None, "0", "1"])
+def test_report_records_posting_reader_mode(
+    e2e, resource_run, monkeypatch, posting_view
+):
+    if posting_view is None:
+        monkeypatch.delenv("VORTEX_SPFRESH_POSTING_VIEW", raising=False)
+    else:
+        monkeypatch.setenv("VORTEX_SPFRESH_POSTING_VIEW", posting_view)
+    cli, _ = resource_run
+    report = e2e.run(cli)
+    assert report["configuration"]["spfresh_posting_view"] == (posting_view or "1")
+
+
+@pytest.mark.parametrize("posting_view", ["", "true", "2"])
+def test_invalid_posting_view_mode_fails_before_starting_workers(
+    e2e, resource_run, monkeypatch, posting_view
+):
+    monkeypatch.setenv("VORTEX_SPFRESH_POSTING_VIEW", posting_view)
+    cli, calls = resource_run
+    with pytest.raises(RuntimeError, match="posting-view mode"):
+        e2e.run(cli)
+    assert not calls
+    assert not cli.output_dir.exists()
+
+
 @pytest.mark.parametrize("query_ids", [[], [0], [0, 2]])
 def test_run_rejects_missing_parity_queries(e2e, resource_run, query_ids):
     cli, calls = resource_run

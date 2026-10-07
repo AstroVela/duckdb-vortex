@@ -564,6 +564,199 @@ the existing benchmark sources so the recorder implementation is traceable.
 This is a more controlled warm resource/quality comparison, not identical cache
 implementations or strict-default SQL performance.
 
+#### Verified-Open Dependency Alignment, 2026-10-07
+
+Both extension adapters, their lockfiles, the production wheel source gate and
+the installed-wheel workflow now use Vortex PR #18's formal merge,
+`30265bd0fdcf70477acaff3f380a015dc6b2f261`. It includes the posting views below
+and the verified-open path that validates artifacts while creating their private
+copies. See the upstream
+[verified-open report](https://github.com/AstroVela/vortex/blob/30265bd0fdcf70477acaff3f380a015dc6b2f261/vortex-duckdb/VERIFIED_OPEN_BENCHMARK.md)
+for that optimization's measurements.
+
+PR #32's installed-wheel smoke had retained the older `c6f7e497` workflow pin
+while its lockfile used `67303ad0`. The source preflight rejected this mismatch
+before installing or running the wheel. A regression now compares the workflow's
+expected revision and version with the reviewed build source and lockfile; it
+failed before the workflow correction. Each regenerated lockfile changes only
+39 Vortex Git source IDs, with every other parsed field unchanged.
+
+The merged source passes 76 focused release/workflow tests and 48 subtests,
+both adapters' locked all-feature scoped Clippy, and a fresh Vane Rust release
+build. Relinking the recorded DuckDB v1.5.0 SDK objects with that unpatched
+archive passes the SQL regression in both copying and view modes: 66 independent
+processes, 38 negative cases and fixture Recall@10 of 1.0 per mode. Provenance
+and per-process logs are retained at `build/verified-open-merged-20261007/`.
+The installed-wheel source preflight itself accepts the current pin and rejects
+the stale one. Remote wheel/Ray qualification is a separate CI run.
+
+The SIFT tables below retain their measured `67303ad0` source identity. They are
+not measurements of `30265bd0`; this dependency update does not rerun the full
+SIFT performance matrix or change the default cache budgets.
+
+#### Merged Posting-View Integration, 2026-10-05
+
+For these measurements, both extension adapters and their lockfiles pinned
+Vortex PR #17's formal merge,
+`67303ad0157f873eea54e9f333737a4ad6bdaa36`, from duckdb-vortex PR #31's merge
+`348d44eebb39009c291c776104a6c6649d8460d5`. Each lockfile changes only 39 Vortex
+Git source IDs; other parsed fields are identical. The production wheel source
+gate uses the same revision. Native, Provider, Rust archives, SQL shells and C API
+executables were rebuilt before timing; this section does not reuse the older
+SQL binaries reported below. SDK link objects were reused, with their source
+owner and DuckDB v1.5.0 recorded in the new build manifests.
+
+Copying (`VORTEX_SPFRESH_POSTING_VIEW=0`) and read-only posting view (`=1`, the
+native default) use the exact same binaries and original sealed generations.
+The toggle is captured when a native handle opens. View mode retains the
+per-posting `fstat` identity guard; it is not an unchecked pointer benchmark.
+No algorithm, strict SQL default or production 256 MiB artifact budget changes.
+SIFT1M alone uses a separately labeled benchmark-only 1 GiB snapshot archive;
+only its retained-artifact constant differs from the merged crate's source.
+
+The constrained driver now explicitly forwards the posting-view setting into
+each systemd worker, records it in worker metadata and the report, and rejects
+values other than `0` and `1` before launching workers. An unset value explicitly
+selects `1` instead of inheriting a potentially different systemd manager value.
+Before this fix, five new regression cases failed because the worker lacked the
+setting or the report omitted it. Pure command and real systemd tests also
+verify that unrelated credentials are not forwarded or logged.
+
+All four complete-record comparisons use the original first 1,000 queries,
+k=10, one warmup and three measured rounds, CPU 8 with a one-core quota, 2 GiB
+charged memory, no swap and one compute worker. OpenData maintenance is off and
+its corrected `68cde646d05165ece33c6e56fe4f345ce6a64f17` harness binary is frozen
+across A/B. Probes remain SQL 64/512 and OpenData nprobe 100/320 for 100K/1M.
+100K runs copy then view, with SQL first in each pair; 1M runs view then copy,
+with OpenData first. No builds or tests run concurrently with measurements.
+
+| Workload | SQL copy C API p50 / p99 ms | SQL view C API p50 / p99 ms | View p50 reduction | SQL / OpenData Recall@10 |
+| --- | ---: | ---: | ---: | ---: |
+| SIFT100K | 5.294 / 5.998 | 4.722 / 5.037 | 10.8% | 99.77% / 99.59% |
+| SIFT1M | 13.886 / 17.386 | 8.927 / 10.447 | 35.7% | 99.40% / 99.46% |
+
+View p99 is 16.0%/39.9% lower on 100K/1M. OpenData's paired copy-run/view-run
+p50/p99 values are 11.232/12.173 and 11.208/12.553 ms on 100K, and
+37.183/42.158 and 37.675/42.801 ms on 1M. Posting view does not affect OpenData;
+both controls are retained rather than selecting one favorable timing.
+SQL's copy/view round medians are 5.265/5.301/5.312 versus
+4.701/4.725/4.740 ms on 100K, and 13.690/13.950/14.080 versus
+8.904/8.912/8.966 ms on 1M.
+
+Every main worker validates 40,000 complete records and measures 3,000 calls.
+Recall floor/gap, repeat and SQL/Provider parity, counter continuity and live
+resource checks pass, with no OOMs or logged errors. Independent diagnostics
+retain 60 registered counter series through close. SlateDB measured data-block
+hits/misses remain 510,636/0 and 1,208,324/0. Both SQL caches start with a miss
+and hit on every later query, including 1,000/1,000 measured hits. These metrics
+still do not imply identical cache implementations.
+
+| Workload | SQL copy RSS / cgroup peak MiB | SQL view RSS / cgroup peak MiB | OpenData copy-run / view-run RSS MiB |
+| --- | ---: | ---: | ---: |
+| SIFT100K | 139 / 281 | 311 / 268 | 139 / 141 |
+| SIFT1M | 388 / 854 | 749 / 738 | 1,019 / 1,012 |
+
+Posting view substantially increases mapped-file RSS. Its lower charged cgroup
+peak is not evidence of lower total memory: the original shared file pages may
+already be charged elsewhere, unlike each worker's private SlateDB copy. Both
+OpenData 1M workers reach the 2,048 MiB charged limit and record whole-worker
+pressure events (1,884/4,805 for copy-run/view-run, including staging), without
+OOM. Production artifact budgeting is unchanged and is not a total RSS limit.
+
+SQL's three measured-round logical read totals drop from
+13,133,244,738 to 7,068,027 bytes on 100K and from 68,953,285,689 to
+7,044,027 on 1M. Read-syscall totals drop from 240,003/1,583,607 to 48,003.
+These whole-round `rchar`/`syscr` counters include untimed output and validation;
+they are not physical disk bytes or counts of `fstat` calls. All main measured
+storage-read and major-fault deltas are zero. This is a warm-path read/copy
+reduction, not a cold-storage result.
+
+One-second samples wholly inside measured-round windows show CPU 26, CPU 8's
+SMT sibling, averaging 98.60%-99.83% idle across the eight main workers, with
+none below 90% idle. Boundary samples are omitted using the post-run
+wall-clock/monotonic offset. These windows include work outside the API timer;
+the host and CPU frequency remain unisolated. SQL view's fresh-process first
+search still costs about 1.93 s/5.60 s for 100K/1M, excluding open, versus
+OpenData 29/142 ms plus separate open costs of 230/2,393 ms. Warm gains do not
+remove validation and initial materialization costs.
+
+The subsequent layered A/B uses the same frozen binaries, inputs, probes and
+copy/view order. Each driver and its children inherit a verified CPU 8/one-core,
+2 GiB/no-swap systemd scope. Native and Provider each measure 3,000 calls after
+complete per-chunk warmups; their individual timers exclude open, close and
+sample output. The profiler-based SQL distribution is independent of the
+uninstrumented C API distribution above.
+
+| Layer | SIFT100K copy / view p50 ms | SIFT1M copy / view p50 ms |
+| --- | ---: | ---: |
+| Native C++, workspace reset control | 15.929 / 13.075 | 39.688 / 25.273 |
+| Native C++, workspace reuse | 2.611 / 1.994 | 10.954 / 6.101 |
+| C bridge | 2.632 / 1.997 | 11.041 / 6.061 |
+| Rust Provider | 2.521 / 1.981 | 10.529 / 6.016 |
+| SQL snapshot, DuckDB profiler enabled | 6.837 / 6.041 | 15.721 / 10.532 |
+
+Every Native/Bridge/Provider copy/view pair has exactly equal ranked IDs and
+distances for all 4,000 warmup/measured samples. Cross-layer and repeat parity
+also pass. Native and Provider return IDs/distances; SQL materializes full rows.
+The workspace-reuse C++ path is a single-handle/thread lower bound, without
+bridge lifecycle guards. Do not subtract mixed API/profile timings and label
+the difference as pure adapter overhead.
+
+Strict SQL controls use only query IDs 0/333/666/999, with 12 measured samples:
+copy/view p50 is 726.365/696.798 ms on 100K and 5,569.946/5,585.996 ms on 1M.
+Their costs remain dominated by strict validation; their small-subset recall
+and percentiles are not the full-query distribution or evidence of strict
+default acceleration. Both 1M modes verify that the production 256 MiB
+snapshot archive rejects the 534,710,361-byte generation before using the
+separate 1 GiB benchmark archive. No budget check was bypassed.
+
+Whole-driver layer windows show mean sibling idle of 99.50%-99.77%, with no
+complete one-second sample below 90%. These windows cover validation, all
+layers and output, not isolated query timers. Charged whole-driver peaks are
+517/502 MiB on 100K and 1,098/1,058 MiB on 1M for copy/view, with no OOMs.
+
+Reports are retained in the `feat/vane-index-posting-view-20261005` worktree at
+`build/e2e-{sift100k,sift1m}-{copy,view}-full/summary.json`, alongside raw full
+records, diagnostics, frozen scripts and phase snapshots. The 64-query smoke
+passed in both modes and is not included in the table. Build manifests are
+`build/capi-{default,cache1g}/build.json`; frozen binaries, link commands and
+the experimental source copy remain local. Host evidence is
+`build/posting-host-20261005.json` and `build/e2e-host-analysis.json`.
+Layer reports are `build/layers-{sift100k,sift1m}-{copy,view}/summary.json`, with
+their independent trace at `build/posting-layer-host-20261005.json`.
+`build/posting-comparison.json` independently validates limits, cache/counter
+continuity, source/input/binary identity and exact Native/Provider A/B ranks,
+and records raw-report hashes, computed improvements and layer host windows.
+
+The rebuilt default/1 GiB C API SHA-256 values are
+`3fc5d440bdbf63f7ef93bea62181d8a414f7f5edfda54ec7905a9f3b9f42923d` and
+`bb3123b52b72f769fe566191dbc6847f45e71268a45a6ec04308907d57d790ef`.
+OpenData remains
+`536c4abfa33be998a2d05fa377696eb318c5b1f4a76c710ed97ebb513470a5a1`.
+Its matching source commit is local and has not yet been pushed.
+Before/after binary guards verify unchanged artifacts throughout smoke and
+full A/B. The new provenance audit verifies the clean merged source, the
+lockfile-only Git changes and the sole experimental source constant change.
+Original stores, fixtures and historical reports are untouched.
+
+To repeat, use the constrained command above with the newly built C API,
+matching existing fixture/parity, explicit `--opendata-nprobe 100` or `320`,
+`--queries 1000 --warmup-rounds 1 --rounds 3`, and a fresh output directory
+for each `VORTEX_SPFRESH_POSTING_VIEW=0` and `=1` run. Use the frozen OpenData
+binary instead of a mutable target artifact; for 1M retain the separate 1 GiB
+C API and opposite engine order. The local `build/run_posting_ab.py` records
+the complete commands and runs the fixed copy/view ordering sequentially.
+
+Verification before timing: 247 benchmark Python tests including real new C API
+and systemd cases with no skips; 57 release/provenance tests plus 16 subtests;
+both extension adapters' locked all-target/all-feature Clippy with no warnings;
+three native CTest cases repeated five times in each mode; and SQL integration
+in both modes, each with 66 independent processes and 38 negative cases.
+Black, Python 3.11 Ruff (`E4,E7,E9,F,I`) and diff whitespace checks pass.
+After measurements, a combined final Python run again passes all 304 tests and
+16 subtests without skips, using the frozen new C API and real systemd workers.
+No ASAN, full-workspace test/build, remote CI or paid service was run.
+
 #### Repeat After Host Load Check, 2026-10-05
 
 Following a report of host load during the previous run, both datasets were

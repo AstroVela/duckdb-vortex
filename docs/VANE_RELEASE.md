@@ -14,7 +14,7 @@ git submodule update --init --recursive
   (`vane-ai==0.2.0`).
 - Full DuckDB source tree ID: `e24da547b83d10b75697b8a40acd684f0a0a8481`;
   native runtime SourceID: `e24da547b8`.
-- Vortex Rust fork: `c6f7e497f99205937a6f4e73b4ab9ac3b74593b3` (merged Vortex #16).
+- Vortex Rust fork: `30265bd0fdcf70477acaff3f380a015dc6b2f261` (merged Vortex #18).
 - Rust: `1.97.1`, with the committed Vane adapter Cargo.lock.
 - Extension vcpkg: `74e6536215718009aae747d86d84b78376bf9e09`.
 - Shared Vane CI tools: `9de078021e3cb0ee09d50568aca114e58f2c2014`.
@@ -45,6 +45,13 @@ candidates use PyPI only. Production may be alpha, beta, RC, final or post-relea
 but not a development, local, epoch or noncanonical version.
 
 ## Build and qualification
+
+Both CI and release builds prefetch GNU Bison 3.8.2 with
+`scripts/fetch_vane_bison.py` before invoking the pinned Vane bootstrap. Downloads
+have bounded connection/transfer timeouts and fall back from the GNU origin to
+the kernel.org GNU mirror. Only an archive matching the bootstrap's fixed
+SHA-256 enters `VANE_BUILD_TOOLS_DIR`; the original bootstrap verifies it again
+before building. A valid cached archive is reused without network access.
 
 `.github/workflows/VaneIntegration.yml` retains ordinary DuckDB isolation and
 Vane native/static-wheel, default Ray smoke, two-node Ray, and ASAN/LSAN lifecycle coverage.

@@ -43,6 +43,41 @@ CONTEXT = {
 INTERPRETERS = ("cp310", "cp311", "cp312", "cp313", "cp314")
 
 
+@pytest.mark.parametrize("manifest", ["vortex-extension", "vortex-extension-vane"])
+def test_vortex_adapters_and_lockfiles_match_the_reviewed_source(manifest):
+    directory = ROOT / manifest
+    dependencies = tomllib.loads((directory / "Cargo.toml").read_text())["dependencies"]
+    for name in ("vortex-duckdb", "vortex-index-spfresh"):
+        assert dependencies[name]["rev"] == builder.EXPECTED_VORTEX_REVISION
+    locked = tomllib.loads((directory / "Cargo.lock").read_text())["package"]
+    sources = {
+        package["source"]
+        for package in locked
+        if package.get("source", "").startswith(
+            "git+https://github.com/AstroVela/vortex.git"
+        )
+    }
+    revision = builder.EXPECTED_VORTEX_REVISION
+    assert sources == {
+        f"git+https://github.com/AstroVela/vortex.git?rev={revision}#{revision}"
+    }
+
+
+def test_installed_wheel_workflow_matches_the_reviewed_vortex_source():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/VaneIntegration.yml").read_text()
+    )
+    environment = workflow["env"]
+    assert environment["VORTEX_EXPECTED_REVISION"] == builder.EXPECTED_VORTEX_REVISION
+    locked = tomllib.loads((ROOT / "vortex-extension-vane/Cargo.lock").read_text())
+    versions = {
+        package["version"]
+        for package in locked["package"]
+        if package["name"] == "vortex-duckdb"
+    }
+    assert versions == {environment["VORTEX_EXPECTED_VERSION"]}
+
+
 def runs(job):
     return "\n".join(step.get("run", "") for step in job["steps"])
 
@@ -69,7 +104,7 @@ def test_production_manifest_preserves_every_other_source_contract(future_revisi
     assert prod == dev
     assert builder.EXPECTED_RUST_RELEASE == "1.97.1"
     assert (
-        builder.EXPECTED_VORTEX_REVISION == "c6f7e497f99205937a6f4e73b4ab9ac3b74593b3"
+        builder.EXPECTED_VORTEX_REVISION == "30265bd0fdcf70477acaff3f380a015dc6b2f261"
     )
     assert builder.SIGNING_PROFILES["production"] == ("astrovela/vane", None)
 
