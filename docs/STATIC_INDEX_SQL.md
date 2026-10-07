@@ -1,8 +1,9 @@
 # Experimental Static Index SQL
 
-This opt-in path composes `vortex-duckdb/index` with `vortex-index-spfresh/native`.
+This opt-in path composes `vortex-duckdb/index` with `vortex-index-spfresh/native`
+and/or `vortex-index-hnswlib/native`.
 SQL bindings use the common `IndexBuilder`, `IndexProvider`, `IndexStore`, and
-`IndexSource::take` contracts. SPFresh is a registered implementation, not a
+`IndexSource::take` contracts. Each backend is a registered implementation, not a
 second index catalog or an independent C++ SQL bridge.
 
 ## Build
@@ -27,6 +28,37 @@ build described in the project guides:
 The Rust manifests enable `index-spfresh` only for this option. Native revision
 and patch stamps are checked by the backend's build script. There is no SPDK,
 RocksDB, online update support, or sanitizer addition in this integration.
+
+### Optional hnswlib Backend
+
+Both adapters pin merged Vortex #19 at
+`114a1f2f59e6daf8377f1f2127b01652fd9448bf`. To enable `hnswlib.static` on Linux
+x86_64, first prepare a clean hnswlib checkout at the exact revision required by
+the native crate:
+
+```bash
+git clone https://github.com/nmslib/hnswlib.git /absolute/path/to/hnswlib
+git -C /absolute/path/to/hnswlib checkout d9b3608c83d83b46c96e25088cb1d729b29dcfe9
+```
+
+Pass these options to either adapter's CMake build:
+
+```text
+-DVORTEX_ENABLE_INDEX_HNSWLIB=ON
+-DVORTEX_HNSWLIB_SOURCE=/absolute/path/to/hnswlib
+```
+
+This enables the optional `index-hnswlib` Cargo feature. The backend verifies the
+source revision and rejects modified native headers. The two backend switches
+are independent and can both be enabled; both remain off by default. A
+hnswlib-only build requires neither the SPFresh native archives nor OpenMP.
+The existing production wheel configuration does not enable either backend.
+
+Construction currently requires `threads=1`: upstream parallel insertion has a
+shared random-generator race. Values such as 0, 2, 4 and 8 are rejected, not
+silently clamped. This integration does not add parallel building, modify the
+cache budgets, change artifact versions, or include SQL projection/rebind
+optimizations.
 
 ## SQL
 
@@ -60,6 +92,28 @@ Optional query `backend_options` is JSON owned by SPFresh. All three fields are
 required when supplied: `max_check`, `internal_results`, and `search_pages`.
 `search_pages` must equal the build's `posting_page_limit`; lowering it is
 rejected. SPFresh supports `k <= 4096` and its existing resource budgets apply.
+
+For hnswlib, use the same SQL interface with its own backend options:
+
+```sql
+SELECT * FROM vortex_index_build(
+    ['/data/even.vortex', '/data/odd.vortex'], '/indexes/hnsw.json',
+    'embedding', 'hnswlib.static',
+    '{"format_version":1,"dimension":8,"m":16,"ef_construction":100,"seed":100,"threads":1}'
+);
+
+SELECT rank, distance, "row".id
+FROM vortex_index_search(
+    '/indexes/hnsw.json', [1,2,3,4,5,6,7,8]::FLOAT[], 10,
+    backend_options := '{"ef":64}'
+)
+ORDER BY rank;
+```
+
+The reference identifies the backend at search time. hnswlib currently supports
+full-coverage, unfiltered, approximate squared-L2 Float32 queries with `k <= 4096`
+and `ef >= k`. It has the same strict/snapshot validation and prepared-owner
+lifetime rules described below; its graph is not a posting-based disk index.
 
 This first implementation is synchronous local SQL, not Ray index execution.
 It requires full coverage, enabled external access, and local filesystem access.
@@ -164,7 +218,8 @@ metadata, native heaps and transient initial verification consume additional
 memory. Snapshot mode reports an explicit budget error instead of falling back
 to rereading a potentially different view. Dropping an owner frees its capacity;
 failed provider opens also release reservations and scratch. The strict mode's
-uncached fallback remains unchanged. Native workspace reuse is not enabled.
+uncached fallback remains unchanged. SQL retention limits are independent of
+backend workspace reuse.
 
 Diagnostics add `validation_mode` and `snapshot_cache_hit`; the first execution
 is a snapshot miss, and subsequent retained executions are hits. See the
@@ -183,12 +238,20 @@ python3 scripts/test_index_sql.py \
 ```
 
 For a shell without built-in Vortex, add `--extension /path/to/vortex.duckdb_extension`.
+Add `--backend hnswlib.static` to qualify hnswlib; the default is `spfresh.static`.
 It must use the same engine ABI; the script permits loading the unsigned local
 artifact. The test builds two interleaved source files, exits, queries from fresh
 processes, compares original rows/squared-L2 scores, measures recall against
-exact search, and checks repeat/prepared equality and invalid/stale inputs.
+exact search, and checks strict/snapshot repeat equality and invalid/stale inputs.
+Snapshot tests retain verified contents across file changes but still reject
+reference replacement and disabled access. hnswlib tests additionally reject
+unsupported construction thread counts without publishing a reference or sealed
+artifacts. As with other backend build failures, an empty unsealed generation
+may remain under the existing owner-managed cleanup contract.
 Per-process logs, CSV results and `summary.json` are retained. This bounded
 fixture is a correctness qualification, not a performance benchmark.
 
 For repeatable same-process performance comparisons and phase diagnostics, see
 [Static index SQL benchmark](INDEX_SQL_BENCHMARK.md).
+For the optional hnswlib backend, see the [integration qualification and three-layer
+benchmark](HNSWLIB_INTEGRATION.md).

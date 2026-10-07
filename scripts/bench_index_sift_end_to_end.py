@@ -321,6 +321,7 @@ def run_worker(
     sql_timing=False,
     private_store=None,
     opendata_counters=False,
+    controller_cpu=None,
 ):
     directory = root / name
     directory.mkdir(mode=0o700)
@@ -369,6 +370,9 @@ def run_worker(
             limits["warmup"],
             limits["rounds"],
             private_store,
+            **(
+                {"controller_cpu": controller_cpu} if controller_cpu is not None else {}
+            ),
         )
     else:
         with (directory / "stdout.log").open("x") as stdout, (
