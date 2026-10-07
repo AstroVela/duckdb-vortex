@@ -10,11 +10,13 @@ path = "src/lib.rs"
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
-vortex-duckdb = { git = "https://github.com/AstroVela/vortex.git", rev = "30265bd0fdcf70477acaff3f380a015dc6b2f261" }
-vortex-index-spfresh = { git = "https://github.com/AstroVela/vortex.git", rev = "30265bd0fdcf70477acaff3f380a015dc6b2f261", features = ["native"], optional = true }
+vortex-duckdb = { git = "https://github.com/AstroVela/vortex.git", rev = "114a1f2f59e6daf8377f1f2127b01652fd9448bf" }
+vortex-index-spfresh = { git = "https://github.com/AstroVela/vortex.git", rev = "114a1f2f59e6daf8377f1f2127b01652fd9448bf", features = ["native"], optional = true }
+vortex-index-hnswlib = { git = "https://github.com/AstroVela/vortex.git", rev = "114a1f2f59e6daf8377f1f2127b01652fd9448bf", features = ["native"], optional = true }
 
 [features]
 index-spfresh = ["vortex-duckdb/index", "dep:vortex-index-spfresh"]
+index-hnswlib = ["vortex-duckdb/index", "dep:vortex-index-hnswlib"]
 
 # This improved build times significantly
 [profile.dev.package.vortex-fastlanes]

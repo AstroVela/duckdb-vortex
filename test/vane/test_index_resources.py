@@ -149,7 +149,10 @@ def test_worker_command_forwards_only_allowed_posting_view_environment(
     os.environ.get("VORTEX_SIFT_SYSTEMD_TESTS") != "1",
     reason="Set VORTEX_SIFT_SYSTEMD_TESTS=1 on a cgroup-v2/systemd-user host",
 )
-def test_real_systemd_worker_constraints_and_phase_handshake(resources, tmp_path):
+@pytest.mark.parametrize("isolated", [False, True])
+def test_real_systemd_worker_constraints_and_phase_handshake(
+    resources, tmp_path, monkeypatch, isolated
+):
     worker = tmp_path / "worker.py"
     worker.write_text(
         "import os, sys\n"
@@ -157,7 +160,16 @@ def test_real_systemd_worker_constraints_and_phase_handshake(resources, tmp_path
         " print(f'SIFT_BENCH_PHASE {os.getpid()} {phase}', flush=True)\n"
         " assert sys.stdin.readline() == 'continue\\n'\n"
     )
-    cpu = min(os.sched_getaffinity(0))
+    original = os.sched_getaffinity(0)
+    cpu = min(original)
+    controller = min(original - {cpu}) if isolated else None
+    capture = resources.capture
+
+    def checked_capture(*args):
+        assert os.sched_getaffinity(0) == ({controller} if isolated else original)
+        return capture(*args)
+
+    monkeypatch.setattr(resources, "capture", checked_capture)
     result = resources.run_constrained(
         [sys.executable, str(worker), *resources.phases(1, 1)],
         tmp_path,
@@ -168,12 +180,56 @@ def test_real_systemd_worker_constraints_and_phase_handshake(resources, tmp_path
         30,
         1,
         1,
+        controller_cpu=controller,
     )
+    assert os.sched_getaffinity(0) == original
     assert result["verified"]
     assert len(result["snapshots"]) == 9
     assert result["snapshots"][0]["cpu_affinity"] == [cpu]
     assert not result["snapshots"][-1]["cgroup"]["memory.events"]["oom_kill"]
     assert json.loads((tmp_path / "constraints.json").read_text())["verified"]
+
+
+def test_controller_affinity_restored_after_spawn_failure(
+    resources, tmp_path, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(resources.os, "sched_getaffinity", lambda pid: {2, 3})
+    monkeypatch.setattr(
+        resources.os, "sched_setaffinity", lambda pid, cpus: calls.append((pid, cpus))
+    )
+
+    def spawn(*args, **kwargs):
+        assert calls == [(0, {3})]
+        raise OSError("spawn failed")
+
+    monkeypatch.setattr(resources.subprocess, "Popen", spawn)
+    monkeypatch.setattr(resources.subprocess, "run", lambda *args, **kwargs: None)
+    with pytest.raises(OSError, match="spawn failed"):
+        resources.run_constrained(
+            ["worker"], tmp_path, {}, tmp_path, 2, 256, 30, 1, 1, controller_cpu=3
+        )
+    assert calls == [(0, {3}), (0, {2, 3})]
+
+
+@pytest.mark.parametrize("controller", [2, 4])
+def test_controller_requires_distinct_available_cpu(
+    resources, tmp_path, monkeypatch, controller
+):
+    monkeypatch.setattr(resources.os, "sched_getaffinity", lambda pid: {2, 3})
+    with pytest.raises(RuntimeError, match="Controller requires a separate"):
+        resources.run_constrained(
+            ["worker"],
+            tmp_path,
+            {},
+            tmp_path,
+            2,
+            256,
+            30,
+            1,
+            1,
+            controller_cpu=controller,
+        )
 
 
 @pytest.mark.skipif(

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-"""Qualify explicit static SPFresh index SQL across independent shell processes."""
+"""Qualify an explicit static backend across independent SQL shell processes."""
 
 import argparse
 import csv
@@ -24,6 +24,11 @@ def require(condition, message):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--duckdb", type=Path, required=True)
+    parser.add_argument(
+        "--backend",
+        choices=("spfresh.static", "hnswlib.static"),
+        default="spfresh.static",
+    )
     parser.add_argument(
         "--extension",
         type=Path,
@@ -49,12 +54,32 @@ def main():
             "posting_page_limit": 12,
             "replicas": 4,
         }
+        if args.backend == "spfresh.static"
+        else {
+            "format_version": 1,
+            "dimension": dimension,
+            "m": 16,
+            "ef_construction": 100,
+            "seed": 100,
+            "threads": 1,
+        }
+    )
+    query_options = (
+        '{"max_check":4096,"internal_results":64,"search_pages":12}'
+        if args.backend == "spfresh.static"
+        else '{"ef":64}'
+    )
+    invalid_query_options = (
+        '{"max_check":4096,"internal_results":64,"search_pages":1}'
+        if args.backend == "spfresh.static"
+        else '{"ef":1}'
     )
     prefix = f"LOAD {quote(args.extension.resolve())};\n" if args.extension else ""
     processes = 0
+    negative_cases = 0
 
     def run(sql, expected_error=None):
-        nonlocal processes
+        nonlocal processes, negative_cases
         processes += 1
         command = [str(args.duckdb.resolve()), "-batch", "-bail"]
         if args.extension:
@@ -65,11 +90,13 @@ def main():
             text=True,
             capture_output=True,
             timeout=180,
+            check=False,
         )
         (work / f"process-{processes}.log").write_text(result.stdout + result.stderr)
         if expected_error is None:
             require(result.returncode == 0, result.stdout + result.stderr)
         else:
+            negative_cases += 1
             require(
                 result.returncode > 0
                 and expected_error.lower() in result.stderr.lower(),
@@ -80,7 +107,7 @@ def main():
     def build(ref=reference, build_files=files, build_options=options):
         return (
             f"SELECT * FROM vortex_index_build([{','.join(map(quote, build_files))}], "
-            f"{quote(ref)}, 'embedding', 'spfresh.static', {quote(build_options)})"
+            f"{quote(ref)}, 'embedding', {quote(args.backend)}, {quote(build_options)})"
         )
 
     def vector(row):
@@ -152,14 +179,11 @@ def main():
         require(order == sorted(order), "Results are not ordered by distance/address")
         explicit_call = search(
             query,
-            suffix=", backend_options := "
-            + quote('{"max_check":4096,"internal_results":64,"search_pages":12}'),
+            suffix=", backend_options := " + quote(query_options),
         )
         repeated = work / f"repeat-{row}.csv"
         query_sql = "[" + ",".join(str(value) + "::FLOAT" for value in query) + "]"
-        search_options = quote(
-            '{"max_check":4096,"internal_results":64,"search_pages":12}'
-        )
+        search_options = quote(query_options)
         parameterized_call = (
             f"vortex_index_search({quote(reference)}, $1, $2, backend_options := $3)"
         )
@@ -169,6 +193,18 @@ def main():
         require(
             output.read_bytes() == repeated.read_bytes(),
             "Cross-process prepared search differed",
+        )
+        snapshot = work / f"snapshot-{row}.csv"
+        run(
+            f"CREATE TEMP TABLE result AS SELECT {columns} FROM {explicit_call} WHERE false;\n"
+            f"PREPARE nearest AS INSERT INTO result SELECT {columns} FROM vortex_index_search({quote(reference)}, $1, $2, backend_options := $3, validation_mode := 'snapshot');\n"
+            f"EXECUTE nearest({query_sql}, {k}, {search_options}); DELETE FROM result;\n"
+            f"EXECUTE nearest({query_sql}, {k}, {search_options});\n"
+            f"COPY (SELECT * FROM result ORDER BY rank) TO {quote(snapshot)} (HEADER true);"
+        )
+        require(
+            output.read_bytes() == snapshot.read_bytes(),
+            "Prepared snapshot differed from strict search",
         )
 
     query = vector(133)
@@ -183,8 +219,8 @@ def main():
             "unknown field",
         ),
         (
-            f"SELECT * FROM {search(query, suffix=', backend_options := ' + quote('{"max_check":4096,"internal_results":64,"search_pages":1}'))};",
-            "query options",
+            f"SELECT * FROM {search(query, suffix=', backend_options := ' + quote(invalid_query_options))};",
+            "query options" if args.backend == "spfresh.static" else "ef",
         ),
         (
             f"SET enable_external_access=false; SELECT * FROM {search(query)};",
@@ -203,7 +239,7 @@ def main():
         f"[{','.join(map(quote, files))}]",
         quote(nul_reference),
         "'embedding'",
-        "'spfresh.static'",
+        quote(args.backend),
         quote(options),
     ]
     for argument in range(len(build_inputs)):
@@ -239,6 +275,25 @@ def main():
             "Rejected operation left a generation or scratch directory",
         )
     run(f"SET disabled_filesystems='PipeFileSystem'; SELECT * FROM {search(query)};")
+    if args.backend == "hnswlib.static":
+        for threads in (0, 2, 4, 8):
+            before = {path for path in work.iterdir() if path.is_dir()}
+            build_options = json.dumps({**json.loads(options), "threads": threads})
+            run(
+                build(blocked_reference, build_options=build_options) + ";", "threads=1"
+            )
+            require(
+                not blocked_reference.exists(),
+                "Rejected thread count published a reference",
+            )
+            # SQL creates the store before invoking the backend; unsealed empty
+            # generations follow the existing owner-managed cleanup contract.
+            for path in {path for path in work.iterdir() if path.is_dir()} - before:
+                require(
+                    path.name.startswith("generation-")
+                    and not any(entry.is_file() for entry in path.rglob("*")),
+                    "Rejected thread count left scratch or published artifacts",
+                )
     run(
         f"COPY (SELECT NULL::FLOAT[{dimension}] AS embedding FROM range(128)) TO {quote(work / 'null.vortex')} (FORMAT vortex);"
     )
@@ -278,12 +333,18 @@ def main():
         + build(replacement_reference, [replacement_file])
         + ";"
     )
-    parameterized_queries = [
-        f"SELECT * FROM vortex_index_search({quote(reference)}, $1, {k})",
-        f"WITH hits AS (SELECT * FROM vortex_index_search({quote(reference)}, $1, {k})) SELECT * FROM hits",
-        f'SELECT (SELECT "row".id FROM vortex_index_search({quote(reference)}, $1, 1))',
-        f'SELECT "row".id FROM vortex_index_search({quote(reference)}, $1, 1) UNION ALL SELECT 999::UBIGINT WHERE false',
-    ]
+    parameterized_queries = []
+    for mode in ("strict", "snapshot"):
+        call = f"vortex_index_search({quote(reference)}, $1, {k}, validation_mode := {quote(mode)})"
+        single = f"vortex_index_search({quote(reference)}, $1, 1, validation_mode := {quote(mode)})"
+        parameterized_queries.extend(
+            [
+                f"SELECT * FROM {call}",
+                f"WITH hits AS (SELECT * FROM {call}) SELECT * FROM hits",
+                f'SELECT (SELECT "row".id FROM {single})',
+                f'SELECT "row".id FROM {single} UNION ALL SELECT 999::UBIGINT WHERE false',
+            ]
+        )
     before = reference.read_bytes()
     query_sql = "[" + ",".join(str(value) + "::FLOAT" for value in query) + "]"
     for prepared_query in parameterized_queries:
@@ -371,8 +432,52 @@ def main():
             path.write_bytes(original)
     run(f"SELECT * FROM {search(query)};")
 
+    snapshot_call = search(query, suffix=", validation_mode := 'snapshot'")
+    for case, path in enumerate(
+        [files[0], manifest, generation / "artifacts" / artifacts[0]["path"]]
+    ):
+        original = path.read_bytes()
+        output = work / f"snapshot-retained-{case}.csv"
+        try:
+            run(
+                f'CREATE TEMP TABLE result AS SELECT rank, "row".id AS id, "row".label AS label FROM {snapshot_call} WHERE false;\n'
+                f'PREPARE nearest AS INSERT INTO result SELECT rank, "row".id, "row".label FROM {snapshot_call};\n'
+                f"EXECUTE nearest; DELETE FROM result;\n"
+                f"COPY (SELECT 'changed') TO {quote(path)} (FORMAT csv);\n"
+                f"EXECUTE nearest;\n"
+                f"COPY (SELECT * FROM result ORDER BY rank) TO {quote(output)} (HEADER true);"
+            )
+            with (work / "query-133.csv").open() as stream:
+                expected = [
+                    (hit["rank"], hit["id"], hit["label"])
+                    for hit in csv.DictReader(stream)
+                ]
+            with output.open() as stream:
+                actual = [
+                    (hit["rank"], hit["id"], hit["label"])
+                    for hit in csv.DictReader(stream)
+                ]
+            require(
+                actual == expected, "Snapshot did not retain original rows and index"
+            )
+            run(
+                f"SELECT * FROM {search(query)};",
+                "version" if case == 0 else "mismatch",
+            )
+        finally:
+            path.write_bytes(original)
+    for setting, error in (
+        ("enable_external_access=false", "external access"),
+        ("disabled_filesystems='LocalFileSystem'", "LocalFileSystem"),
+    ):
+        run(
+            f"PREPARE nearest AS SELECT * FROM {snapshot_call}; EXECUTE nearest; SET {setting}; EXECUTE nearest;",
+            error,
+        )
+
     report = {
         "status": "ok",
+        "backend": args.backend,
         "duckdb": str(args.duckdb.resolve()),
         "rows": rows,
         "dimension": dimension,
@@ -382,6 +487,9 @@ def main():
         "recall_at_k": sum(recalls) / len(recalls),
         "cross_process_reopen": True,
         "prepared_repeat_equal": True,
+        "snapshot_repeat_equal": True,
+        "snapshot_retains_verified_contents": True,
+        "snapshot_checks_execution_access": True,
         "backend_options_parity": True,
         "ranked_original_rows": True,
         "nul_arguments_rejected": True,
@@ -389,11 +497,7 @@ def main():
         "invalid_vector_types_rejected": True,
         "parameterized_reference_pinned": True,
         "first_execution_reference_pinned": True,
-        "negative_cases": len(negatives)
-        + 6
-        + len(invalid_vectors)
-        + len(parameterized_queries)
-        + len(initial_bind_queries),
+        "negative_cases": negative_cases,
         "reference": str(reference),
     }
     (work / "summary.json").write_text(json.dumps(report, indent=2) + "\n")

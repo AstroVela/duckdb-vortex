@@ -6,7 +6,7 @@
 use std::ffi::c_char;
 use std::ffi::c_void;
 
-#[cfg(feature = "index-spfresh")]
+#[cfg(any(feature = "index-spfresh", feature = "index-hnswlib"))]
 mod index;
 
 /// Global symbol visibility in the Vortex extension:
@@ -20,7 +20,7 @@ mod index;
 /// The DuckDB extension ABI initialization function.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vortex_init_rust(db: *mut c_void) {
-    #[cfg(feature = "index-spfresh")]
+    #[cfg(any(feature = "index-spfresh", feature = "index-hnswlib"))]
     index::register();
     unsafe { vortex_duckdb::initialize_extension_from_raw(db) };
 }

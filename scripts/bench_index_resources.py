@@ -162,8 +162,15 @@ def run_constrained(
     warmup,
     rounds,
     private_store=None,
+    controller_cpu=None,
 ):
-    bench.require(cpu in os.sched_getaffinity(0), "CPU is not available to this caller")
+    original_affinity = os.sched_getaffinity(0)
+    bench.require(cpu in original_affinity, "CPU is not available to this caller")
+    if controller_cpu is not None:
+        bench.require(
+            controller_cpu in original_affinity and controller_cpu != cpu,
+            "Controller requires a separate available CPU",
+        )
     bench.require(128 <= memory_mib <= 65536, "Expected 128..=65536 MiB cgroup budget")
     unit = f"vane-sift-{uuid.uuid4().hex[:16]}.service"
     worker_command = [
@@ -219,6 +226,8 @@ def run_constrained(
         "verified": False,
         "snapshots": [],
     }
+    if controller_cpu is not None:
+        result["controller_cpu"] = controller_cpu
     if private_store is not None:
         result["private_store"] = {
             "source": str(source),
@@ -227,6 +236,8 @@ def run_constrained(
         }
     process = None
     try:
+        if controller_cpu is not None:
+            os.sched_setaffinity(0, {controller_cpu})
         with (output / "stdout.log").open("x") as stdout, (output / "stderr.log").open(
             "x"
         ) as stderr:
@@ -285,6 +296,8 @@ def run_constrained(
         )
         return result
     finally:
+        if controller_cpu is not None:
+            os.sched_setaffinity(0, original_affinity)
         subprocess.run(
             ["systemctl", "--user", "stop", unit],
             stdout=subprocess.DEVNULL,
