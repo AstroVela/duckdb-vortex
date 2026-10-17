@@ -10,11 +10,14 @@ path = "src/lib.rs"
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
-vortex-duckdb = { git = "https://github.com/AstroVela/vortex.git", rev = "114a1f2f59e6daf8377f1f2127b01652fd9448bf" }
-vortex-index-spfresh = { git = "https://github.com/AstroVela/vortex.git", rev = "114a1f2f59e6daf8377f1f2127b01652fd9448bf", features = ["native"], optional = true }
-vortex-index-hnswlib = { git = "https://github.com/AstroVela/vortex.git", rev = "114a1f2f59e6daf8377f1f2127b01652fd9448bf", features = ["native"], optional = true }
+vortex-duckdb = { git = "https://github.com/sollhui/vortex.git", rev = "032130251ff030a3ed04df12a3a49952316b41b5" }
+vortex-index-spfresh = { git = "https://github.com/sollhui/vortex.git", rev = "032130251ff030a3ed04df12a3a49952316b41b5", features = ["native"], optional = true }
+vortex-index-hnswlib = { git = "https://github.com/sollhui/vortex.git", rev = "032130251ff030a3ed04df12a3a49952316b41b5", features = ["native"], optional = true }
+
+vortex-fts = { git = "https://github.com/sollhui/vortex.git", rev = "032130251ff030a3ed04df12a3a49952316b41b5", optional = true }
 
 [features]
+index-tantivy = ["vortex-duckdb/index", "dep:vortex-fts"]
 index-spfresh = ["vortex-duckdb/index", "dep:vortex-index-spfresh"]
 index-hnswlib = ["vortex-duckdb/index", "dep:vortex-index-hnswlib"]
 

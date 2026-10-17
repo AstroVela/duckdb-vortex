@@ -9,7 +9,11 @@ use std::ffi::c_char;
 #[cfg(vortex_vane_distributed)]
 use std::ffi::c_void;
 
-#[cfg(any(feature = "index-spfresh", feature = "index-hnswlib"))]
+#[cfg(any(
+    feature = "index-spfresh",
+    feature = "index-hnswlib",
+    feature = "index-tantivy"
+))]
 #[path = "../../vortex-extension/src/index.rs"]
 mod index;
 
@@ -24,7 +28,11 @@ mod index;
 #[cfg(vortex_vane_distributed)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn vortex_init_vane_rust(loader: *mut c_void) {
-    #[cfg(any(feature = "index-spfresh", feature = "index-hnswlib"))]
+    #[cfg(any(
+        feature = "index-spfresh",
+        feature = "index-hnswlib",
+        feature = "index-tantivy"
+    ))]
     index::register();
     unsafe { vortex_duckdb::initialize_vane(loader) };
 }

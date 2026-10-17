@@ -13,6 +13,18 @@ use vortex_index_spfresh::{
 };
 
 pub(crate) fn register() {
+    #[cfg(feature = "index-tantivy")]
+    vortex_duckdb::index::register_index_provider_factory(
+        vortex_fts::TANTIVY_ID,
+        |session, scratch| {
+            Ok(Arc::new(vortex_fts::TantivyProvider::try_new(
+                session,
+                scratch.to_path_buf(),
+            )?))
+        },
+    )
+    .expect("Failed to register the static Tantivy SQL provider");
+
     #[cfg(feature = "index-spfresh")]
     vortex_duckdb::index::register_index_provider_factory(SPFRESH_ID, |session, scratch| {
         let builder = SpFreshIndexBuilder::try_new(
