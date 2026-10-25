@@ -558,12 +558,23 @@ def clear_fault_injection_state() -> None:
 
 
 def register_fault_query(task: object) -> None:
-    from vane.runners.ray.query_resource_graph import (
-        QueryAllocation,
-        QueryResourceGraph,
-        ResourceUnitSpec,
-        ResourceVector,
-    )
+    try:
+        from vane.execution.query_resource_spec import (
+            QueryAllocation,
+            QueryResourceGraph,
+            ResourceUnitSpec,
+            ResourceVector,
+        )
+    except ModuleNotFoundError as error:
+        # The production manifest still pins the earlier Ray-owned resource API.
+        if error.name not in {"vane.execution", "vane.execution.query_resource_spec"}:
+            raise
+        from vane.runners.ray.query_resource_graph import (
+            QueryAllocation,
+            QueryResourceGraph,
+            ResourceUnitSpec,
+            ResourceVector,
+        )
     from vane.runners.ray.query_resource_graph_builder import (
         native_fragment_unit_id_for_fragment,
     )

@@ -87,6 +87,10 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: 1.97.1
       CARGO_INCREMENTAL: "0"
+      VANE_EXPECTED_REVISION: bee095a9494aa7bde112ee155a56239e8a90c72f
+      VANE_EXPECTED_PACKAGE_VERSION: 0.3.0.dev62
+      VANE_EXPECTED_FORK_VERSION: v1.5.5-vane.bee095a949
+      VANE_EXPECTED_DUCKDB_SOURCE_ID: 830d7bf6485ea8da211a2342a4b3f86684054db5
       VANE_EXTENSION_ROOT: ${{ github.workspace }}/extension
       VANE_MANIFEST: ${{ github.workspace }}/extension/vane-extension.toml
       VANE_SOURCE_DIR: ${{ github.workspace }}/vane
@@ -326,8 +330,8 @@ jobs:
           for wheel in dist.glob("vane_extension_vortex-*.whl"):
               shutil.copyfile(wheel, selected / wheel.name)
           PY
-          # Validate stable-version dependencies; this read-only check does not publish.
-          python -I extension/vane-extension-ci-tools/scripts/vane_provider_release.py validate --channel release \
+          # Validate development dependencies and size limits without publishing.
+          python -I extension/vane-extension-ci-tools/scripts/vane_provider_release.py validate --channel testpypi-dev \
             --manifest "$VANE_MANIFEST" --extension-root "$VANE_EXTENSION_ROOT" \
             --vane-source "$VANE_SOURCE_DIR" \
             --ci-tools-version "$(git -C "$VANE_EXTENSION_ROOT" rev-parse HEAD:vane-extension-ci-tools)" \
