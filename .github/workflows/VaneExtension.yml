@@ -132,7 +132,7 @@ jobs:
       - name: Validate exact Vane and CI-tools identities
         shell: bash
         env:
-          VANE_CI_TOOLS_VERSION: 1852af617031f24feca6724f41e946887fb6df6b
+          VANE_CI_TOOLS_VERSION: ddbfe405dd7bd47e285f360000d26b1a14a5a4bd
         run: |
           set -euo pipefail
           actual_ci_tools="$(git -C extension/vane-extension-ci-tools rev-parse HEAD)"
@@ -675,7 +675,7 @@ jobs:
       - name: Validate exact Vane and CI-tools identities
         shell: bash
         env:
-          VANE_CI_TOOLS_VERSION: 1852af617031f24feca6724f41e946887fb6df6b
+          VANE_CI_TOOLS_VERSION: ddbfe405dd7bd47e285f360000d26b1a14a5a4bd
         run: |
           set -euo pipefail
           actual_ci_tools="$(git -C extension/vane-extension-ci-tools rev-parse HEAD)"
