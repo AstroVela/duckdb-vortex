@@ -39,10 +39,11 @@ source revision, distributed headers, or required build inputs are absent.
 
 The Vane lane selects `vortex-extension-vane/Cargo.toml`; the ordinary lane
 continues to select `vortex-extension/Cargo.toml`. Both manifests pin
-`AstroVela/vortex@dd15b32254ca9649ee1fd1925aadc9fd53b8bfc6`, the merged Vortex #15
-commit, which includes the
-common DuckDB-filesystem-backed Vortex writer and adapts the distributed
-bind-data enum to the current Vane SDK. The Vane integration manifest
+`AstroVela/vortex@114a1f2f59e6daf8377f1f2127b01652fd9448bf`, the merged Vortex #19
+commit. It includes the optional hnswlib backend, handle-owned SPFresh workspaces, read-only posting views,
+and one-pass verified artifact materialization, alongside the common
+DuckDB-filesystem-backed Vortex writer and distributed bind-data enum adapted
+to the current Vane SDK. The Vane integration manifest
 also pins
 `AstroVela/vane@79049f382ba6ee79d035c09cc8b5d3538e5bbe6a`
 (`vane-ai==0.2.0`). CMake explicitly

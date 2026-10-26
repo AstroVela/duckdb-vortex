@@ -53,17 +53,27 @@ jobs:
           python-version: "3.12"
 
       - name: Install release validation tooling
-        run: python -m pip install --disable-pip-version-check -r vane-extension-ci-tools/requirements-release.txt pytest pyyaml
+        run: >-
+          python -m pip install --disable-pip-version-check
+          -r vane-extension-ci-tools/requirements-release.txt pytest pyyaml numpy
 
       - name: Exercise the provider release and native packaging contracts
         run: |
           python -I test/vane/test_vane_provider_release.py
           python -I test/vane/test_vane_dynamic_wheel.py
           python -I test/vane/test_vane_runtime_identity.py
-          python -I -m pytest -q test/vane/test_vane_dynamic_signing.py test/vane/test_vane_production_release.py
+          python -I -m pytest -q \
+            test/vane/test_vane_dynamic_signing.py \
+            test/vane/test_vane_production_release.py \
+            test/vane/test_vane_bison.py
           python -I -m pytest -q \
             test/vane/test_index_sql_benchmark.py \
-            test/vane/test_index_layers_benchmark.py
+            test/vane/test_index_layers_benchmark.py \
+            test/vane/test_index_sift_benchmark.py \
+            test/vane/test_index_sift_end_to_end.py \
+            test/vane/test_index_resources.py \
+            test/vane/test_index_hnsw_build.py \
+            test/vane/test_index_hnsw_layers.py
 
   vane-dynamic-wheel:
     if: inputs.operation != 'testpypi-dev' && inputs.operation != 'release'
@@ -221,6 +231,7 @@ jobs:
           VANE_BUILD_TOOLS_DIR: ${{ runner.temp }}/vane-build-tools
         run: |
           set -euo pipefail
+          python -I "$VANE_EXTENSION_ROOT/scripts/fetch_vane_bison.py"
           bash "$VANE_SOURCE_DIR/scripts/bootstrap_manylinux_bison.sh"
           echo "$VANE_BISON_INSTALL_PREFIX/bin" >> "$GITHUB_PATH"
           printf 'VANE_BISON=%s\n' "$VANE_BISON_INSTALL_PREFIX/bin/bison" >> "$GITHUB_ENV"
@@ -666,6 +677,7 @@ jobs:
           VANE_BUILD_TOOLS_DIR: ${{ runner.temp }}/vane-build-tools
         run: |
           set -euo pipefail
+          python -I "$VANE_EXTENSION_ROOT/scripts/fetch_vane_bison.py"
           bash "$VANE_SOURCE_DIR/scripts/bootstrap_manylinux_bison.sh"
           echo "$VANE_BISON_INSTALL_PREFIX/bin" >> "$GITHUB_PATH"
           printf 'VANE_BISON=%s\n' "$VANE_BISON_INSTALL_PREFIX/bin/bison" >> "$GITHUB_ENV"
