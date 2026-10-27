@@ -43,12 +43,18 @@ CONTEXT = {
 INTERPRETERS = ("cp310", "cp311", "cp312", "cp313", "cp314")
 
 
-@pytest.mark.parametrize("manifest", ["vortex-extension", "vortex-extension-vane"])
-def test_vortex_adapters_and_lockfiles_match_the_reviewed_source(manifest):
+@pytest.mark.parametrize(
+    ("manifest", "revision"),
+    [
+        ("vortex-extension", "37adb2d8d163df1c6ef1c39d49ed1014f6acc659"),
+        ("vortex-extension-vane", builder.EXPECTED_VORTEX_REVISION),
+    ],
+)
+def test_vortex_adapters_and_lockfiles_match_the_reviewed_source(manifest, revision):
     directory = ROOT / manifest
     dependencies = tomllib.loads((directory / "Cargo.toml").read_text())["dependencies"]
     for name in ("vortex-duckdb", "vortex-index-spfresh", "vortex-index-hnswlib"):
-        assert dependencies[name]["rev"] == builder.EXPECTED_VORTEX_REVISION
+        assert dependencies[name]["rev"] == revision
     locked = tomllib.loads((directory / "Cargo.lock").read_text())["package"]
     sources = {
         package["source"]
@@ -57,7 +63,6 @@ def test_vortex_adapters_and_lockfiles_match_the_reviewed_source(manifest):
             "git+https://github.com/AstroVela/vortex.git"
         )
     }
-    revision = builder.EXPECTED_VORTEX_REVISION
     assert sources == {
         f"git+https://github.com/AstroVela/vortex.git?rev={revision}#{revision}"
     }
