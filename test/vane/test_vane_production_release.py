@@ -46,7 +46,7 @@ INTERPRETERS = ("cp310", "cp311", "cp312", "cp313", "cp314")
 @pytest.mark.parametrize(
     ("manifest", "revision"),
     [
-        ("vortex-extension", "37adb2d8d163df1c6ef1c39d49ed1014f6acc659"),
+        ("vortex-extension", "ee085f55a705cb9b2edab18d392dd822540774d7"),
         ("vortex-extension-vane", builder.EXPECTED_VORTEX_REVISION),
     ],
 )
