@@ -27,7 +27,7 @@ import yaml
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = REPOSITORY_ROOT / "vane-provider-release.toml"
 VANE_VERSION = "0.2.0.dev612"
-VERSIONS = {"vortex": "0.2.0.0.612.1"}
+VERSIONS = {"vortex": "0.2.0.1.dev612"}
 INTERPRETERS = ("cp310", "cp311", "cp312", "cp313", "cp314")
 PLATFORM = "manylinux_2_28_x86_64"
 
@@ -46,10 +46,18 @@ def load_validator():
 
 
 def write_wheels(
-    directory: Path, provider: str, *, vane_requirement: str | None = None
+    directory: Path,
+    provider: str,
+    *,
+    vane_requirement: str | None = None,
+    vane_version: str = VANE_VERSION,
 ) -> list[Path]:
     distribution = f"vane_extension_{provider}"
-    version = VERSIONS[provider]
+    version = (
+        VERSIONS[provider].removesuffix(".dev612")
+        if vane_version == "0.2.0"
+        else VERSIONS[provider]
+    )
     requirements = [vane_requirement or f"vane-ai==={VANE_VERSION}"]
     metadata = (
         "Metadata-Version: 2.4\n"
@@ -144,7 +152,10 @@ class ProviderReleaseTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="vane-vortex-ci-matrix-") as value:
             directory = Path(value)
             paths = write_wheels(
-                directory, "vortex", vane_requirement="vane-ai===0.2.0"
+                directory,
+                "vortex",
+                vane_requirement="vane-ai===0.2.0",
+                vane_version="0.2.0",
             )
             for path in paths:
                 if "-cp312-" not in path.name:
@@ -153,7 +164,7 @@ class ProviderReleaseTest(unittest.TestCase):
                 self.validator.validate_release(
                     directory, version, config, channel=channel
                 ),
-                VERSIONS,
+                {"vortex": "0.2.0.1"},
             )
             # A stale dev dependency must still fail the same CI gate.
             write_wheels(directory, "vortex", vane_requirement="vane-ai===0.2.0.dev662")
@@ -199,7 +210,7 @@ class ProviderReleaseTest(unittest.TestCase):
                 directory / "vane",
                 "a" * 40,
             )
-            self.assertEqual(query.call_count, 1)
+            self.assertEqual(query.call_count, 2)
             expected = {
                 "vane_version": VANE_VERSION,
                 **{f"{name}_version": version for name, version in VERSIONS.items()},
