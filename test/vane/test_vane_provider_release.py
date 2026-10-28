@@ -106,27 +106,42 @@ class ProviderReleaseTest(unittest.TestCase):
             [("vortex", "vane-extension-vortex", ())],
         )
 
-    def test_ci_runtime_expectations_match_the_stable_baseline(self) -> None:
+    def test_ci_runtime_expectations_preserve_production_and_select_development(
+        self,
+    ) -> None:
         manifest = tomllib.loads((REPOSITORY_ROOT / "vane-extension.toml").read_text())
         expected = {
             "VANE_EXPECTED_PACKAGE_VERSION": "0.2.0",
             "VANE_EXPECTED_FORK_VERSION": "v1.5.5-vane.5489cd8a64",
             "VANE_EXPECTED_DUCKDB_SOURCE_ID": "e24da547b83d10b75697b8a40acd684f0a0a8481",
         }
-        for filename in ("VaneExtension.yml", "VaneIntegration.yml"):
-            workflow = yaml.safe_load(
-                (REPOSITORY_ROOT / ".github/workflows" / filename).read_text()
-            )
-            with self.subTest(workflow=filename):
-                for name, value in expected.items():
-                    self.assertEqual(workflow["env"][name], value)
-                if filename == "VaneIntegration.yml":
-                    self.assertEqual(
-                        workflow["env"]["VANE_EXPECTED_REVISION"],
-                        manifest["vane"]["revision"],
-                    )
+        workflow = yaml.safe_load(
+            (REPOSITORY_ROOT / ".github/workflows/VaneExtension.yml").read_text()
+        )
+        for name, value in expected.items():
+            self.assertEqual(workflow["env"][name], value)
+        development = {
+            "VANE_EXPECTED_PACKAGE_VERSION": "0.3.0.dev62",
+            "VANE_EXPECTED_FORK_VERSION": "v1.5.5-vane.bee095a949",
+            "VANE_EXPECTED_DUCKDB_SOURCE_ID": "830d7bf6485ea8da211a2342a4b3f86684054db5",
+            "VANE_EXPECTED_REVISION": manifest["vane"]["revision"],
+        }
+        integration = yaml.safe_load(
+            (REPOSITORY_ROOT / ".github/workflows/VaneIntegration.yml").read_text()
+        )
+        for name, value in development.items():
+            self.assertEqual(integration["env"][name], value)
+        for job in (
+            "vane-dynamic-wheel",
+            "vane-dynamic-vortex-integration",
+            "vane-dynamic-ray-vortex-integration",
+        ):
+            for name, value in development.items():
+                self.assertEqual(workflow["jobs"][job]["env"][name], value)
 
-    def test_ci_matrix_validation_accepts_stable_wheel_dependencies(self) -> None:
+    def test_ci_matrix_validation_requires_exact_development_wheel_dependencies(
+        self,
+    ) -> None:
         workflow = yaml.safe_load(
             (REPOSITORY_ROOT / ".github/workflows/VaneExtension.yml").read_text()
         )
@@ -139,12 +154,16 @@ class ProviderReleaseTest(unittest.TestCase):
         script = step["run"]
         command = shlex.split(script[script.index("python -I extension/") :])
         channel = command[command.index("--channel") + 1]
-        version = workflow["env"]["VANE_EXPECTED_PACKAGE_VERSION"]
+        self.assertEqual(channel, "testpypi-dev")
+        self.assertNotIn("--require-publishable-on", command)
+        version = workflow["jobs"]["vane-dynamic-wheel"]["env"][
+            "VANE_EXPECTED_PACKAGE_VERSION"
+        ]
         config = replace(self.config, interpreters=("cp312",))
         with tempfile.TemporaryDirectory(prefix="vane-vortex-ci-matrix-") as value:
             directory = Path(value)
             paths = write_wheels(
-                directory, "vortex", vane_requirement="vane-ai===0.2.0"
+                directory, "vortex", vane_requirement=f"vane-ai==={version}"
             )
             for path in paths:
                 if "-cp312-" not in path.name:
@@ -155,15 +174,20 @@ class ProviderReleaseTest(unittest.TestCase):
                 ),
                 VERSIONS,
             )
-            # A stale dev dependency must still fail the same CI gate.
-            write_wheels(directory, "vortex", vane_requirement="vane-ai===0.2.0.dev662")
-            for path in directory.glob("*.whl"):
-                if "-cp312-" not in path.name:
-                    path.unlink()
-            with self.assertRaises(self.validator.ReleaseValidationError):
-                self.validator.validate_release(
-                    directory, version, config, channel=channel
-                )
+            for stale_version in ("0.2.0", "0.3.0.dev61"):
+                with self.subTest(stale_version=stale_version):
+                    write_wheels(
+                        directory,
+                        "vortex",
+                        vane_requirement=f"vane-ai==={stale_version}",
+                    )
+                    for path in directory.glob("*.whl"):
+                        if "-cp312-" not in path.name:
+                            path.unlink()
+                    with self.assertRaises(self.validator.ReleaseValidationError):
+                        self.validator.validate_release(
+                            directory, version, config, channel=channel
+                        )
 
     def test_complete_release_cli_outputs(self) -> None:
         # Generic matrix/index edge cases live in the shared tools repository.
@@ -287,7 +311,7 @@ class ProviderReleaseTest(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], 2)
         self.assertEqual(manifest["vane"]["repository"], "AstroVela/vane")
         self.assertEqual(
-            manifest["vane"]["revision"], "79049f382ba6ee79d035c09cc8b5d3538e5bbe6a"
+            manifest["vane"]["revision"], "bee095a9494aa7bde112ee155a56239e8a90c72f"
         )
         self.assertIn(
             manifest["vane"]["revision"],
