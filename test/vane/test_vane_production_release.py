@@ -46,7 +46,7 @@ INTERPRETERS = ("cp310", "cp311", "cp312", "cp313", "cp314")
 @pytest.mark.parametrize(
     ("manifest", "revision"),
     [
-        ("vortex-extension", "ee085f55a705cb9b2edab18d392dd822540774d7"),
+        ("vortex-extension", builder.EXPECTED_VORTEX_REVISION),
         ("vortex-extension-vane", builder.EXPECTED_VORTEX_REVISION),
     ],
 )
@@ -109,7 +109,7 @@ def test_production_manifest_preserves_every_other_source_contract(future_revisi
     assert prod == dev
     assert builder.EXPECTED_RUST_RELEASE == "1.97.1"
     assert (
-        builder.EXPECTED_VORTEX_REVISION == "114a1f2f59e6daf8377f1f2127b01652fd9448bf"
+        builder.EXPECTED_VORTEX_REVISION == "9133de570e7ad634aea43beb1cbbd4ea559a5491"
     )
     assert builder.SIGNING_PROFILES["production"] == ("astrovela/vane", None)
 
