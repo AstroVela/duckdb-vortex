@@ -10,9 +10,9 @@ path = "src/lib.rs"
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
-vortex-duckdb = { git = "https://github.com/AstroVela/vortex.git", rev = "1835d60a7e36e8ed6aca10113c45dc966fd4664a" }
-vortex-index-spfresh = { git = "https://github.com/AstroVela/vortex.git", rev = "1835d60a7e36e8ed6aca10113c45dc966fd4664a", features = ["native"], optional = true }
-vortex-index-hnswlib = { git = "https://github.com/AstroVela/vortex.git", rev = "1835d60a7e36e8ed6aca10113c45dc966fd4664a", features = ["native"], optional = true }
+vortex-duckdb = { git = "https://github.com/AstroVela/vortex.git", rev = "8a3b12a4a2f90dde6ba7f158ba63fb43537da39d" }
+vortex-index-spfresh = { git = "https://github.com/AstroVela/vortex.git", rev = "8a3b12a4a2f90dde6ba7f158ba63fb43537da39d", features = ["native"], optional = true }
+vortex-index-hnswlib = { git = "https://github.com/AstroVela/vortex.git", rev = "8a3b12a4a2f90dde6ba7f158ba63fb43537da39d", features = ["native"], optional = true }
 
 [features]
 index-spfresh = ["vortex-duckdb/index", "dep:vortex-index-spfresh"]

@@ -10,7 +10,8 @@ second index catalog or an independent C++ SQL bridge.
 
 The default extension build is unchanged. Static SPFresh currently requires
 Linux x86_64, a qualified PIC native build, and the matching Vortex revision.
-Build the native dependencies in the pinned Vortex checkout:
+Both adapters pin `8a3b12a4a2f90dde6ba7f158ba63fb43537da39d`.
+Build the native dependencies in that Vortex checkout:
 
 ```bash
 bash vortex-index-spfresh/native/build.sh
@@ -28,12 +29,13 @@ build described in the project guides:
 The Rust manifests enable `index-spfresh` only for this option. Native revision
 and patch stamps are checked by the backend's build script. There is no SPDK,
 RocksDB, online update support, or sanitizer addition in this integration.
+The vector adapters register `vortex_index_build` and `vortex_index_search`.
+Full-text SQL requires the Tantivy provider.
 
 ### Optional hnswlib Backend
 
-Both adapters pin merged Vortex #19 at
-`114a1f2f59e6daf8377f1f2127b01652fd9448bf`. To enable `hnswlib.static` on Linux
-x86_64, first prepare a clean hnswlib checkout at the exact revision required by
+To enable `hnswlib.static` on Linux x86_64, first prepare a clean
+hnswlib checkout at the exact revision required by
 the native crate:
 
 ```bash
