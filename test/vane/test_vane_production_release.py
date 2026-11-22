@@ -109,7 +109,7 @@ def test_production_manifest_preserves_every_other_source_contract(future_revisi
     assert prod == dev
     assert builder.EXPECTED_RUST_RELEASE == "1.97.1"
     assert (
-        builder.EXPECTED_VORTEX_REVISION == "4b396b4e88909cd7c87e3b27af733947fe8e8808"
+        builder.EXPECTED_VORTEX_REVISION == "54b2bde9255e24c21f936f5623fd4a66e4a7ede0"
     )
     assert builder.SIGNING_PROFILES["production"] == ("astrovela/vane", None)
 
@@ -505,7 +505,8 @@ def test_fresh_package_verifies_every_runtime_and_emits_nothing_on_failure(
     verifies = [
         command
         for command in commands
-        if any(str(item).endswith("/verify_extension_wheel.py") for item in command)
+        if any(str(item).endswith("/vane_provider_build.py") for item in command)
+        and command[command.index("--operation") + 1] == "verify"
     ]
     assert len(verifies) == 5
     assert [command[command.index("--base-wheel") + 1] for command in verifies] == [

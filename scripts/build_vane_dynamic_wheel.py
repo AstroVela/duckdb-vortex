@@ -46,7 +46,7 @@ EXPECTED_DUCKDB_LICENSE_PATTERNS = (
     "external/duckdb/third_party/jemalloc/LICENSE",
 )
 EXPECTED_RUST_RELEASE = "1.97.1"
-EXPECTED_VORTEX_REVISION = "4b396b4e88909cd7c87e3b27af733947fe8e8808"
+EXPECTED_VORTEX_REVISION = "54b2bde9255e24c21f936f5623fd4a66e4a7ede0"
 _MAX_RUST_LICENSE_BYTES = 16 * 1024 * 1024
 _MAX_RUST_STDLIB_LICENSE_BYTES = 2 * 1024 * 1024
 _REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -580,7 +580,16 @@ def _build_provider_wheel(
     command = [
         str(python),
         "-I",
-        str(vane_source / "scripts/build_extension_wheel.py"),
+        str(
+            Path(__file__).resolve().parents[1]
+            / "vane-extension-ci-tools/scripts/vane_provider_build.py"
+        ),
+        "--extension-root",
+        str(Path(__file__).resolve().parents[1]),
+        "--vane-source",
+        str(vane_source),
+        "--operation",
+        "build",
         "--artifact",
         str(artifact),
         "--extension-name",
@@ -910,7 +919,16 @@ def main() -> int:
                     (
                         str(builder_python),
                         "-I",
-                        str(vane_source / "scripts/verify_extension_wheel.py"),
+                        str(
+                            Path(__file__).resolve().parents[1]
+                            / "vane-extension-ci-tools/scripts/vane_provider_build.py"
+                        ),
+                        "--extension-root",
+                        str(Path(__file__).resolve().parents[1]),
+                        "--vane-source",
+                        str(vane_source),
+                        "--operation",
+                        "verify",
                         "--base-wheel",
                         str(runtime_wheel),
                         "--extension-wheel",

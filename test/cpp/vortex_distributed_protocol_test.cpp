@@ -78,6 +78,24 @@ void RequireQuerySuccess(Connection &connection, const string &sql) {
 	}
 }
 
+void CheckIndexCatalog(Connection &connection) {
+	auto result = connection.Query(
+	    "SELECT count(DISTINCT function_name) FILTER "
+	    "(WHERE function_name IN ('vortex_index_build', 'vortex_index_search')), "
+	    "count(*) FILTER (WHERE function_name IN ('vortex_fts_build', 'vortex_fts_search')) "
+	    "FROM duckdb_functions() WHERE function_type = 'table'");
+	Check(result != nullptr && !result->HasError() && result->RowCount() == 1,
+	      "could not inspect the Vortex SQL index catalog");
+	Check(result->GetValue(1, 0).GetValue<int64_t>() == 0, "Vortex exposed FTS SQL without a full-text provider");
+#ifdef VORTEX_TEST_VECTOR_INDEX_SQL
+	constexpr int64_t expected_vector_functions = 2;
+#else
+	constexpr int64_t expected_vector_functions = 0;
+#endif
+	Check(result->GetValue(0, 0).GetValue<int64_t>() == expected_vector_functions,
+	      "Vortex vector SQL does not match the configured backend features");
+}
+
 vector<ResultRow> ReadRows(QueryResult &result) {
 	if (result.HasError()) {
 		throw std::runtime_error("query execution failed: " + result.GetError());
@@ -822,6 +840,7 @@ void TestProtocol() {
 
 	DuckDB coordinator_database(nullptr);
 	Connection coordinator(coordinator_database);
+	CheckIndexCatalog(coordinator);
 	for (idx_t file_index = 0; file_index < files.size(); file_index++) {
 		auto start = file_index * 10;
 		auto sql = "COPY (SELECT CAST(" + std::to_string(start) + " + range AS BIGINT) AS id, 'row-' || CAST(" +
