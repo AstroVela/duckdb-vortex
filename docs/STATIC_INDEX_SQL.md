@@ -10,7 +10,7 @@ second index catalog or an independent C++ SQL bridge.
 
 The default extension build is unchanged. Static SPFresh currently requires
 Linux x86_64, a qualified PIC native build, and the matching Vortex revision.
-Both adapters pin `ae3fe0004cca7e41e11b43a9b1bd23b97336c457`.
+Both adapters pin `54b2bde9255e24c21f936f5623fd4a66e4a7ede0`.
 Build the native dependencies in that Vortex checkout:
 
 ```bash
