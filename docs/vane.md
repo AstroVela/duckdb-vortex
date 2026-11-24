@@ -39,7 +39,7 @@ source revision, distributed headers, or required build inputs are absent.
 
 The Vane lane selects `vortex-extension-vane/Cargo.toml`; the ordinary lane
 continues to select `vortex-extension/Cargo.toml`. Both manifests pin
-`AstroVela/vortex@54b2bde9255e24c21f936f5623fd4a66e4a7ede0`.
+`AstroVela/vortex@42beeb3a72769869a3d3d16887a011ee7f922362`.
 The pin includes the optional hnswlib backend, handle-owned SPFresh workspaces, read-only posting views,
 and one-pass verified artifact materialization, alongside the common
 DuckDB-filesystem-backed Vortex writer and distributed bind-data enum adapted
