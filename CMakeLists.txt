@@ -240,6 +240,9 @@ if(BUILD_VORTEX_DISTRIBUTED_TESTS)
     add_executable(vortex_distributed_protocol_test EXCLUDE_FROM_ALL
                    test/cpp/vortex_distributed_protocol_test.cpp)
     target_compile_features(vortex_distributed_protocol_test PRIVATE cxx_std_20)
+    if(VORTEX_ENABLE_INDEX_SPFRESH OR VORTEX_ENABLE_INDEX_HNSWLIB)
+        target_compile_definitions(vortex_distributed_protocol_test PRIVATE VORTEX_TEST_VECTOR_INDEX_SQL)
+    endif()
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         # C++20 header constants must coexist with DuckDB's C++11 definitions.
         target_compile_options(vortex_distributed_protocol_test PRIVATE -fno-gnu-unique)
